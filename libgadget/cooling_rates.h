@@ -48,6 +48,9 @@ struct cooling_params
 
     /* Hydrogen heating modifier */
     double HydrogenHeatAmp;
+    
+    /* Xray heating modifier, default = 0 */
+    double XrayHeatingFactor;
 
     /*Parameters for the 'extra heating' Helium photoionization model.*/
     int HeliumHeatOn;

@@ -943,6 +943,9 @@ set_cooling_params(ParameterSet * ps)
         CoolingParams.MinGasTemp = param_get_double(ps, "MinGasTemp");
         CoolingParams.UVRedshiftThreshold = param_get_double(ps, "UVRedshiftThreshold");
         CoolingParams.HydrogenHeatAmp = log10(param_get_double(ps, "HydrogenHeatAmp"));
+        
+        /*Xray heating parameters*/
+        CoolingParams.XrayHeatingFactor = param_get_double(ps, "XrayHeatingFactor");
 
         /*Helium model parameters*/
         CoolingParams.HeliumHeatOn = param_get_int(ps, "HeliumHeatOn");
@@ -1074,6 +1077,17 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
     double Heat = (nH0 * uvbg->epsH0 + He.nHe0 * uvbg->epsHe0 + He.nHep * uvbg->epsHep)/nh;
 
     Heat *= cool_he_reion_factor(density, helium, redshift);
+    
+    // X-ray heating rate
+    // Uses basic model from Furlanetto 2006
+    // eps_X = 3.4x10^40 fX fabs rho_SFR
+    // fX ~ 1, fabs ~ 0.2 as defaults
+    // rho_SFR ~ Star formation rate, in proper units
+    //double SFR = 0.01 * pow((1+redshift)/8.0,-3.6); // star formation history assumed in Pober+15
+    double SFR = 0.01376 * pow(1+redshift,3.26) / (1+pow((1+redshift)/2.59,5.68)); // star formation history fit from Robertson+15
+    SFR *= pow(3.086e24,-3.0) * pow(1+redshift,3.0); // convert SFR units from comoving Mpc^-3 to proper cm^-3
+    Heat += 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR / (nh*nh); // X-ray heating rate, scaled by fX * fabs = XrayHeatingFactor parameter.
+    
     /*Set external equilibrium electron density*/
     *ne_equilib = nebynh;
 

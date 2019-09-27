@@ -202,6 +202,7 @@ create_gadget_parameter_set()
     param_declare_int(ps, "SelfShieldingOn", OPTIONAL, 1, "Enable a correction in the cooling table for self-shielding.");
     param_declare_double(ps, "PhotoIonizeFactor", OPTIONAL, 1, "Scale the TreeCool table by this factor.");
     param_declare_int(ps, "PhotoIonizationOn", OPTIONAL, 1, "Should PhotoIonization be enabled.");
+    param_declare_double(ps, "XrayHeatingFactor", OPTIONAL, 0, "Scale the X-ray heating rate by this factor. 1.0 corresponds to fX * fabs = 0.2.");
     /* End cooling module parameters*/
 
     param_declare_int(ps, "HydroOn", OPTIONAL, 1, "Enables hydro force");
