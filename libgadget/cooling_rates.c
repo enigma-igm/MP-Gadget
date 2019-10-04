@@ -268,10 +268,6 @@ struct UVBG get_global_UVBG(double redshift)
     if(!CoolingParams.PhotoIonizationOn)
         return GlobalUVBG;
 
-    /* if a threshold is set, disable UV bg above that redshift */
-    if(CoolingParams.UVRedshiftThreshold >= 0. && redshift > CoolingParams.UVRedshiftThreshold)
-        return GlobalUVBG;
-
     GlobalUVBG.gJH0 = get_photo_rate(redshift, &Gamma_HI);
     GlobalUVBG.gJHe0 = get_photo_rate(redshift, &Gamma_HeI);
     GlobalUVBG.gJHep = get_photo_rate(redshift, &Gamma_HeII);
@@ -279,6 +275,19 @@ struct UVBG get_global_UVBG(double redshift)
     GlobalUVBG.epsH0 = get_photo_rate(redshift, &Eps_HI);
     GlobalUVBG.epsHe0 = get_photo_rate(redshift, &Eps_HeI);
     GlobalUVBG.epsHep = get_photo_rate(redshift, &Eps_HeII);
+    
+    /* if a threshold is set, disable UV bg above that redshift */
+    if(CoolingParams.UVRedshiftThreshold >= 0. && redshift > CoolingParams.UVRedshiftThreshold) {
+        double damp = exp(-25.0*(redshift-CoolingParams.UVRedshiftThreshold));
+        GlobalUVBG.gJH0 *= damp;
+        GlobalUVBG.gJHe0 *= damp;
+        GlobalUVBG.gJHep *= damp;
+    
+        GlobalUVBG.epsH0 *= damp;
+        GlobalUVBG.epsHe0 *= damp;
+        GlobalUVBG.epsHep *= damp;
+    }
+    
     GlobalUVBG.self_shield_dens = self_shield_dens(redshift, &GlobalUVBG);
     return GlobalUVBG;
 }
@@ -1086,6 +1095,8 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
     //double SFR = 0.01 * pow((1+redshift)/8.0,-3.6); // star formation history assumed in Pober+15
     double SFR = 0.01376 * pow(1+redshift,3.26) / (1+pow((1+redshift)/2.59,5.68)); // star formation history fit from Robertson+15
     SFR *= pow(3.086e24,-3.0) * pow(1+redshift,3.0); // convert SFR units from comoving Mpc^-3 to proper cm^-3
+    double XrayEmiss = 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR; // erg / s / cm^-3
+    //double XrayEps = XrayEmiss / (0.049 * 3 * HUBBLE
     Heat += 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR / (nh*nh); // X-ray heating rate, scaled by fX * fabs = XrayHeatingFactor parameter.
     
     /*Set external equilibrium electron density*/
