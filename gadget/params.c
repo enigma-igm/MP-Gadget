@@ -203,6 +203,9 @@ create_gadget_parameter_set()
     param_declare_double(ps, "PhotoIonizeFactor", OPTIONAL, 1, "Scale the TreeCool table by this factor.");
     param_declare_int(ps, "PhotoIonizationOn", OPTIONAL, 1, "Should PhotoIonization be enabled.");
     param_declare_double(ps, "XrayHeatingFactor", OPTIONAL, 0, "Scale the X-ray heating rate by this factor. 1.0 corresponds to fX * fabs = 0.2.");
+    
+    param_declare_int(ps, "FreezeOutOn", OPTIONAL, 0, "Should recombination freezeout be enabled.");
+    param_declare_string(ps, "RecFastFile", OPTIONAL, "", "Path to the RecFast Table");
     /* End cooling module parameters*/
 
     param_declare_int(ps, "HydroOn", OPTIONAL, 1, "Enables hydro force");
@@ -455,6 +458,9 @@ void read_parameter_file(char *fname)
         param_get_string2(ps, "TreeCoolFile", All.TreeCoolFile, sizeof(All.TreeCoolFile));
         param_get_string2(ps, "UVFluctuationfile", All.UVFluctuationFile, sizeof(All.UVFluctuationFile));
         param_get_string2(ps, "MetalCoolFile", All.MetalCoolFile, sizeof(All.MetalCoolFile));
+        
+        //All.FreezeOutOn = param_get_int(ps, "FreezeOutOn");
+        param_get_string2(ps, "RecFastFile", All.RecFastFile, sizeof(All.RecFastFile));
 
         All.InitGasTemp = param_get_double(ps, "InitGasTemp");
 

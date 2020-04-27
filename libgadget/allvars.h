@@ -277,6 +277,10 @@ extern struct global_data_all_processes
     char TreeCoolFile[100];
     char MetalCoolFile[100];
     char UVFluctuationFile[100];
+    
+    /* New FreezeOut stuff */
+    //int FreezeOutOn;
+    char RecFastFile[100];
 
     /*Should we store the energy to EnergyFile on PM timesteps.*/
     int OutputEnergyDebug;

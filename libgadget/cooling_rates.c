@@ -92,6 +92,11 @@ static struct itp_type Gamma_HI, Gamma_HeI, Gamma_HeII;
 /*These are the photo-heating rates*/
 static struct itp_type Eps_HI, Eps_HeI, Eps_HeII;
 
+/*Interpolation objects for x_e from RECFAST recomb. freezeout*/
+static int NRECFAST;
+static double * xe_z;
+static struct itp_type xe_rf, t_rf;
+
 /*Recombination and collisional rates*/
 #define NRECOMBTAB 1000
 #define RECOMBTMAX log(1e9)
@@ -209,6 +214,54 @@ load_treecool(const char * TreeCoolFile)
     init_itp_type(Gamma_log1z, &Eps_HeII, NTreeCool);
 
     message(0, "Read %d lines z = %g - %g from file %s\n", NTreeCool, pow(10, Gamma_log1z[0])-1, pow(10, Gamma_log1z[NTreeCool-1])-1, TreeCoolFile);
+}
+
+
+/* This function loads the recfast file into the (global function) data arrays.
+* Format of the recfast table:
+z  xe  T
+ where xe is the electron fraction (i.e. nebynh), and T is the temperature at mean density
+*/
+static void
+load_recfast(const char * RecFastFile) {
+    
+    if(!CoolingParams.FreezeOutOn)
+        return;
+    FILE * fd = fopen(RecFastFile, "r");
+    if(!fd)
+        endrun(456, "Could not open recfast file at: '%s'\n", RecFastFile);
+    
+    NRECFAST = 276; // placeholder
+    
+    MPI_Bcast(&(NRECFAST), 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    /*Allocate memory for the photon background table.*/
+    xe_z = mymalloc("RecFastTable", 3 * NTreeCool * sizeof(double));
+    xe_rf.ydata = xe_z + NRECFAST;
+    t_rf.ydata = xe_z + 2*NRECFAST;
+    
+    int ThisTask;
+    MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+    if(ThisTask == 0)
+    {
+        int i = 0;
+        while(i < NRECFAST)
+        {
+            fscanf(fd,"%lf %lf %lf\n",&(xe_z[i]),&(xe_rf.ydata[i]),&(t_rf.ydata[i]));
+            i++;
+        }
+        
+        fclose(fd);
+    }
+    
+    /*Broadcast data to other processors*/
+    MPI_Bcast(xe_z, 3 * NRECFAST, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    /*Initialize the UVB redshift interpolation: reticulate the splines*/
+    init_itp_type(xe_z, &xe_rf, NRECFAST);
+    init_itp_type(xe_z, &t_rf, NRECFAST);
+    
+    message(0, "Read %d lines z = %g - %g from file %s\n", NRECFAST, xe_z[0], xe_z[NRECFAST-1], RecFastFile);
+    
 }
 
 /*Get photo ionization rate for neutral Hydrogen*/
@@ -955,6 +1008,9 @@ set_cooling_params(ParameterSet * ps)
         
         /*Xray heating parameters*/
         CoolingParams.XrayHeatingFactor = param_get_double(ps, "XrayHeatingFactor");
+        
+        /*Freezeout parameters*/
+        CoolingParams.FreezeOutOn = param_get_int(ps, "FreezeOutOn");
 
         /*Helium model parameters*/
         CoolingParams.HeliumHeatOn = param_get_int(ps, "HeliumHeatOn");
@@ -968,7 +1024,7 @@ set_cooling_params(ParameterSet * ps)
 /*Initialize the cooling rate module. This builds a lot of interpolation tables.
  * Defaults: TCMB 2.7255, recomb = Verner96, cooling = Sherwood.*/
 void
-init_cooling_rates(const char * TreeCoolFile, const char * MetalCoolFile, Cosmology * CP)
+init_cooling_rates(const char * TreeCoolFile, const char * RecFastFile, const char * MetalCoolFile, Cosmology * CP)
 {
     CoolingParams.fBar = CP->OmegaBaryon / CP->OmegaCDM;
     CoolingParams.rho_crit_baryon = CP->OmegaBaryon * 3.0 * pow(CP->HubbleParam*HUBBLE,2.0) /(8.0*M_PI*GRAVITY);
@@ -985,6 +1041,11 @@ init_cooling_rates(const char * TreeCoolFile, const char * MetalCoolFile, Cosmol
         message(0, "Using uniform UVB from file %s\n", TreeCoolFile);
         /* Load the TREECOOL into Gamma_HI->ydata, and initialise the interpolators*/
         load_treecool(TreeCoolFile);
+    }
+    
+    if (CoolingParams.FreezeOutOn == 1) {
+        message(0, "Using RECFAST electron fraction from file %s\n", RecFastFile);
+        load_recfast(RecFastFile);
     }
 
     /*Initialize the recombination tables*/
@@ -1044,6 +1105,13 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
     double ne = get_equilib_ne(density, ienergy, helium, &logt, uvbg, *ne_equilib);
     double nh = density * (1 - helium);
     double nebynh = ne/nh;
+    if (CoolingParams.FreezeOutOn) {
+        double xe_min = gsl_interp_eval(xe_rf.intp, xe_z, xe_rf.ydata, redshift, NULL);
+        if (nebynh < xe_min) {
+            nebynh = xe_min;
+            ne = xe_min*nh;
+        }
+    }
     /*Faster than running the exp.*/
     double temp = get_temp_internal(nebynh, ienergy, helium);
     double photofac = self_shield_corr(nh, logt, uvbg->self_shield_dens);
@@ -1093,11 +1161,12 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
     // fX ~ 1, fabs ~ 0.2 as defaults
     // rho_SFR ~ Star formation rate, in proper units
     //double SFR = 0.01 * pow((1+redshift)/8.0,-3.6); // star formation history assumed in Pober+15
-    double SFR = 0.01376 * pow(1+redshift,3.26) / (1+pow((1+redshift)/2.59,5.68)); // star formation history fit from Robertson+15
-    SFR *= pow(3.086e24,-3.0) * pow(1+redshift,3.0); // convert SFR units from comoving Mpc^-3 to proper cm^-3
-    double XrayEmiss = 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR; // erg / s / cm^-3
-    //double XrayEps = XrayEmiss / (0.049 * 3 * HUBBLE
-    Heat += 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR / (nh*nh); // X-ray heating rate, scaled by fX * fabs = XrayHeatingFactor parameter.
+    if (CoolingParams.XrayHeatingFactor > 0) {
+        double SFR = 0.01376 * pow(1+redshift,3.26) / (1+pow((1+redshift)/2.59,5.68)); // star formation history fit from Robertson+15
+        SFR *= pow(3.086e24,-3.0) * pow(1+redshift,3.0); // convert SFR units from comoving Mpc^-3 to proper cm^-3
+        double avg_nh = 0.049*pow(1+redshift,3)*3*pow(0.675*HUBBLE,2.0)/(8*M_PI*GRAVITY)*(1-helium)/PROTONMASS; // HACKED IN average nH
+        Heat += 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR / (nh*avg_nh); // X-ray heating rate, scaled by fX * fabs = XrayHeatingFactor parameter.
+    }
     
     /*Set external equilibrium electron density*/
     *ne_equilib = nebynh;

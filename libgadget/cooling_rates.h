@@ -58,6 +58,9 @@ struct cooling_params
     double HeliumHeatAmp;
     double HeliumHeatExp;
     double rho_crit_baryon;
+    
+    /*Turn on minimum electron fraction from recombination freeze-out*/
+    int FreezeOutOn;
 };
 
 /*Set the parameters for the cooling module from the parameter file.*/
@@ -67,7 +70,7 @@ void set_coolpar(struct cooling_params cp);
 
 /*Initialize the cooling rate module. This builds a lot of interpolation tables.
  * Defaults: TCMB 2.7255, recomb = Verner96, cooling = Sherwood.*/
-void init_cooling_rates(const char * TreeCoolFile, const char * MetalCoolFile, Cosmology * CP);
+void init_cooling_rates(const char * TreeCoolFile, const char * RecFastFile, const char * MetalCoolFile, Cosmology * CP);
 
 /*Reads and initialises the tables for a spatially varying redshift of reionization*/
 void init_uvf_table(const char * UVFluctuationFile);
