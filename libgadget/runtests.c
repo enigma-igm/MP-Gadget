@@ -192,12 +192,7 @@ runfof(int RestartSnapNum)
     DomainDecomp ddecomp[1] = {0};
     init(RestartSnapNum, ddecomp);          /* ... read in initial model */
 
-    ForceTree Tree = {0};
-    /*FoF needs a tree*/
-    int HybridNuGrav = All.HybridNeutrinosOn && All.Time <= All.HybridNuPartTime;
-    force_tree_rebuild(&Tree, ddecomp, All.BoxSize, HybridNuGrav, 0, All.OutputDir);
-    FOFGroups fof = fof_fof(&Tree, MPI_COMM_WORLD);
-    force_tree_free(&Tree);
+    FOFGroups fof = fof_fof(ddecomp, All.BoxSize, MPI_COMM_WORLD);
     fof_save_groups(&fof, RestartSnapNum, MPI_COMM_WORLD);
     fof_finish(&fof);
 }
