@@ -213,7 +213,7 @@ runfof(int RestartSnapNum)
         }
         /* Not-allocated tree*/
         ForceTree Tree = {0};
-        cooling_and_starformation(&Act, Tree, GradRho, NULL);
+        cooling_and_starformation(&Act, &Tree, GradRho, NULL);
         if(GradRho)
             myfree(GradRho);
     }
