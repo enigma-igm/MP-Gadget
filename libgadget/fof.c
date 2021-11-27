@@ -88,7 +88,14 @@ static double fof_periodic_wrap(double x, double BoxSize)
     return x;
 }
 
-static void fof_label_secondary(ForceTree * tree);
+struct fof_particle_list
+{
+    MyIDType MinID;
+    int MinIDTask;
+    int Pindex;
+};
+
+static void fof_label_secondary(struct fof_particle_list * HaloLabel, ForceTree * tree);
 static int fof_compare_HaloLabel_MinID(const void *a, const void *b);
 static int _fof_compare_Group_MinIDTask_ThisTask;
 static int fof_compare_Group_MinIDTask(const void *a, const void *b);
@@ -102,15 +109,15 @@ static void fof_reduce_groups(
 
 static void fof_finish_group_properties(FOFGroups * fof, double BoxSize);
 
-static int fof_compile_base(struct BaseGroup * base, int NgroupsExt, MPI_Comm Comm);
-static void fof_compile_catalogue(FOFGroups * fof, const int NgroupsExt, double BoxSize, MPI_Comm Comm);
+static int fof_compile_base(struct BaseGroup * base, int NgroupsExt, struct fof_particle_list * HaloLabel, MPI_Comm Comm);
+static void fof_compile_catalogue(FOFGroups * fof, const int NgroupsExt, struct fof_particle_list * HaloLabel, double BoxSize, MPI_Comm Comm);
 
 static struct Group *
 fof_alloc_group(const struct BaseGroup * base, const int NgroupsExt);
 
 static void fof_assign_grnr(struct BaseGroup * base, const int NgroupsExt, MPI_Comm Comm);
 
-void fof_label_primary(ForceTree * tree, MPI_Comm Comm);
+void fof_label_primary(struct fof_particle_list * HaloLabel, ForceTree * tree, MPI_Comm Comm);
 extern void fof_save_particles(FOFGroups * fof, int num, int SaveParticles, MPI_Comm Comm);
 
 typedef struct {
@@ -133,13 +140,6 @@ typedef struct {
     TreeWalkNgbIterBase base;
 } TreeWalkNgbIterFOF;
 
-static struct fof_particle_list
-{
-    MyIDType MinID;
-    int MinIDTask;
-    int Pindex;
-}
-*HaloLabel;
 
 static MPI_Datatype MPI_TYPE_GROUP;
 
@@ -161,7 +161,7 @@ fof_fof(DomainDecomp * ddecomp, const double BoxSize, const int StoreGrNr, MPI_C
 
     message(0, "Comoving linking length: %g\n", fof_params.FOFHaloComovingLinkingLength);
 
-    HaloLabel = (struct fof_particle_list *) mymalloc("HaloLabel", PartManager->NumPart * sizeof(struct fof_particle_list));
+    struct fof_particle_list * HaloLabel = (struct fof_particle_list *) mymalloc("HaloLabel", PartManager->NumPart * sizeof(struct fof_particle_list));
 
     /* HaloLabel stores the MinID and MinIDTask of particles, this pair serves as a halo label. */
     #pragma omp parallel for
@@ -174,14 +174,14 @@ fof_fof(DomainDecomp * ddecomp, const double BoxSize, const int StoreGrNr, MPI_C
     force_tree_rebuild_mask(&dmtree, ddecomp, DMMASK, BoxSize, 0, NULL);
 
     /* Fill FOFP_List of primary */
-    fof_label_primary(&dmtree, Comm);
+    fof_label_primary(HaloLabel, &dmtree, Comm);
 
     MPIU_Barrier(Comm);
     message(0, "Group finding done.\n");
     walltime_measure("/FOF/Primary");
 
     /* Fill FOFP_List of secondary */
-    fof_label_secondary(&dmtree);
+    fof_label_secondary(HaloLabel, &dmtree);
     force_tree_free(&dmtree);
 
     MPIU_Barrier(Comm);
@@ -202,7 +202,7 @@ fof_fof(DomainDecomp * ddecomp, const double BoxSize, const int StoreGrNr, MPI_C
     /* We create the smaller 'BaseGroup' data set for this. */
     struct BaseGroup * base = (struct BaseGroup *) mymalloc("BaseGroup", sizeof(struct BaseGroup) * NgroupsExt);
 
-    NgroupsExt = fof_compile_base(base, NgroupsExt, Comm);
+    NgroupsExt = fof_compile_base(base, NgroupsExt, HaloLabel, Comm);
 
     MPIU_Barrier(Comm);
     message(0, "Compiled local group data and catalogue.\n");
@@ -220,7 +220,7 @@ fof_fof(DomainDecomp * ddecomp, const double BoxSize, const int StoreGrNr, MPI_C
 
     myfree(base);
 
-    fof_compile_catalogue(&fof, NgroupsExt, BoxSize, Comm);
+    fof_compile_catalogue(&fof, NgroupsExt, HaloLabel, BoxSize, Comm);
 
     MPIU_Barrier(Comm);
     message(0, "Finished FoF. Group properties are now allocated.. (presently allocated=%g MB)\n",
@@ -273,6 +273,7 @@ struct FOFPrimaryPriv {
     struct SpinLocks * spin;
     char * PrimaryActive;
     MyIDType * OldMinID;
+    struct fof_particle_list * HaloLabel;
 };
 #define FOF_PRIMARY_GET_PRIV(tw) ((struct FOFPrimaryPriv *) (tw->priv))
 
@@ -351,8 +352,8 @@ static void fof_primary_copy(int place, TreeWalkQueryFOF * I, TreeWalk * tw) {
     }
     /* Secondary treewalk, no need for locking here*/
     int head = HEAD(place, FOF_PRIMARY_GET_PRIV(tw)->Head);
-    I->MinID = HaloLabel[head].MinID;
-    I->MinIDTask = HaloLabel[head].MinIDTask;
+    I->MinID = FOF_PRIMARY_GET_PRIV(tw)->HaloLabel[head].MinID;
+    I->MinIDTask = FOF_PRIMARY_GET_PRIV(tw)->HaloLabel[head].MinIDTask;
 }
 
 static int fof_primary_haswork(int n, TreeWalk * tw) {
@@ -367,7 +368,7 @@ fof_primary_ngbiter(TreeWalkQueryFOF * I,
         TreeWalkNgbIterFOF * iter,
         LocalTreeWalk * lv);
 
-void fof_label_primary(ForceTree * tree, MPI_Comm Comm)
+void fof_label_primary(struct fof_particle_list * HaloLabel, ForceTree * tree, MPI_Comm Comm)
 {
     int i;
     int64_t link_across;
@@ -397,7 +398,7 @@ void fof_label_primary(ForceTree * tree, MPI_Comm Comm)
     FOF_PRIMARY_GET_PRIV(tw)->Head = (int*) mymalloc("FOF_Links", PartManager->NumPart * sizeof(int));
     FOF_PRIMARY_GET_PRIV(tw)->PrimaryActive = (char*) mymalloc("FOFActive", PartManager->NumPart * sizeof(char));
     FOF_PRIMARY_GET_PRIV(tw)->OldMinID = (MyIDType *) mymalloc("FOFActive", PartManager->NumPart * sizeof(MyIDType));
-
+    FOF_PRIMARY_GET_PRIV(tw)->HaloLabel = HaloLabel;
     /* allocate buffers to arrange communication */
 
     t0 = second();
@@ -519,6 +520,7 @@ fofp_merge(int target, int other, TreeWalk * tw)
 
     /* Get a copy of h2 under the lock, which ensures
      * that MinID and MinIDTask do not change independently. */
+    struct fof_particle_list * HaloLabel = FOF_PRIMARY_GET_PRIV(tw)->HaloLabel;
     struct fof_particle_list h2label;
     lock_spinlock(h2, spin);
     h2label.MinID = HaloLabel[h2].MinID;
@@ -569,6 +571,7 @@ fof_primary_ngbiter(TreeWalkQueryFOF * I,
     else /* mode is 1, target is a ghost */
     {
         int head = HEAD(other, FOF_PRIMARY_GET_PRIV(tw)->Head);
+        struct fof_particle_list * HaloLabel = FOF_PRIMARY_GET_PRIV(tw)->HaloLabel;
         struct SpinLocks * spin = FOF_PRIMARY_GET_PRIV(tw)->spin;
 //        printf("locking %d by %d in ngbiter\n", other, omp_get_thread_num());
         lock_spinlock(head, spin);
@@ -759,7 +762,7 @@ fof_finish_group_properties(struct FOFGroups * fof, double BoxSize)
 }
 
 static int
-fof_compile_base(struct BaseGroup * base, int NgroupsExt, MPI_Comm Comm)
+fof_compile_base(struct BaseGroup * base, int NgroupsExt, struct fof_particle_list * HaloLabel, MPI_Comm Comm)
 {
     memset(base, 0, sizeof(base[0]) * NgroupsExt);
 
@@ -833,7 +836,7 @@ fof_alloc_group(const struct BaseGroup * base, const int NgroupsExt)
 }
 
 static void
-fof_compile_catalogue(struct FOFGroups * fof, const int NgroupsExt, double BoxSize, MPI_Comm Comm)
+fof_compile_catalogue(struct FOFGroups * fof, const int NgroupsExt, struct fof_particle_list * HaloLabel, double BoxSize, MPI_Comm Comm)
 {
     int i, start, ThisTask;
 
@@ -1126,6 +1129,7 @@ struct FOFSecondaryPriv {
     float *distance;
     float *hsml;
     int *npleft;
+    struct fof_particle_list * HaloLabel;
 };
 
 #define FOF_SECONDARY_GET_PRIV(tw) ((struct FOFSecondaryPriv *) (tw->priv))
@@ -1146,8 +1150,8 @@ static void fof_secondary_reduce(int place, TreeWalkResultFOF * O, enum TreeWalk
     if(O->Distance < FOF_SECONDARY_GET_PRIV(tw)->distance[place])
     {
         FOF_SECONDARY_GET_PRIV(tw)->distance[place] = O->Distance;
-        HaloLabel[place].MinID = O->MinID;
-        HaloLabel[place].MinIDTask = O->MinIDTask;
+        FOF_SECONDARY_GET_PRIV(tw)->HaloLabel[place].MinID = O->MinID;
+        FOF_SECONDARY_GET_PRIV(tw)->HaloLabel[place].MinIDTask = O->MinIDTask;
     }
 }
 
@@ -1169,8 +1173,8 @@ fof_secondary_ngbiter(TreeWalkQueryFOF * I,
     if(r < O->Distance)
     {
         O->Distance = r;
-        O->MinID = HaloLabel[other].MinID;
-        O->MinIDTask = HaloLabel[other].MinIDTask;
+        O->MinID = FOF_SECONDARY_GET_PRIV(lv->tw)->HaloLabel[other].MinID;
+        O->MinIDTask = FOF_SECONDARY_GET_PRIV(lv->tw)->HaloLabel[other].MinIDTask;
     }
     /* No need to search nodes at a greater distance
      * now that we have a neighbour.*/
@@ -1204,7 +1208,7 @@ fof_secondary_postprocess(int p, TreeWalk * tw)
     }
 }
 
-static void fof_label_secondary(ForceTree * tree)
+static void fof_label_secondary(struct fof_particle_list * HaloLabel, ForceTree * tree)
 {
     int n;
 
@@ -1230,6 +1234,7 @@ static void fof_label_secondary(ForceTree * tree)
 
     FOF_SECONDARY_GET_PRIV(tw)->distance = (float *) mymalloc("FOF_SECONDARY->distance", sizeof(float) * PartManager->NumPart);
     FOF_SECONDARY_GET_PRIV(tw)->hsml = (float *) mymalloc("FOF_SECONDARY->hsml", sizeof(float) * PartManager->NumPart);
+    FOF_SECONDARY_GET_PRIV(tw)->HaloLabel = HaloLabel;
 
     #pragma omp parallel for
     for(n = 0; n < PartManager->NumPart; n++)
