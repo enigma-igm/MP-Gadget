@@ -147,7 +147,7 @@ create_gadget_parameter_set()
     param_declare_string(ps, "MetalCoolFile", OPTIONAL, "", "Path to the Metal Cooling Table. Empty string disables metal cooling. Refer to cooling.c");
     param_declare_string(ps, "ReionHistFile", OPTIONAL, "", "Path to the file containing the helium III reionization table. Used if QSOLightupOn = 1.");
     param_declare_string(ps, "UVFluctuationFile", OPTIONAL, "", "Path to the UVFluctation Table. Refer to cooling.c.");
-
+    param_declare_double(ps, "HIReionTemp", OPTIONAL, 0, "Boost the particle temperature to this value during the timestep when it undergoes HI reionization. Do not boost star-forming gas. 1807.09282 suggests a boost of 20000.");
     param_declare_double(ps, "UVRedshiftThreshold", OPTIONAL, -1.0, "Earliest Redshift that UV background is enabled. This modulates UVFluctuation and TreeCool globally. Default -1.0 means no modulation.");
     static ParameterEnum CoolingTypeTable [] = {
         {"KWH92", KWH92 },
@@ -189,6 +189,8 @@ create_gadget_parameter_set()
     param_declare_double(ps, "MinGasTemp", OPTIONAL, 5, "Minimum gas temperature");
 
     param_declare_int(ps, "SnapshotWithFOF", REQUIRED, 0, "Enable Friends-of-Friends halo finder.");
+    param_declare_int(ps, "FOFPrimaryLinkTypes", OPTIONAL, 2, "2^ particle types to use as primary FOF targets.");
+    param_declare_int(ps, "FOFSecondaryLinkTypes", OPTIONAL, 1+16+32, "2^ particle types to link to nearest primaries.");
     param_declare_int(ps, "FOFSaveParticles", OPTIONAL, 1, "Save particles in the FOF catalog.");
     param_declare_double(ps, "FOFHaloLinkingLength", OPTIONAL, 0.2, "Linking length for Friends of Friends halos.");
     param_declare_int(ps, "FOFHaloMinLength", OPTIONAL, 32, "Minimum number of particles per FOF Halo.");
@@ -246,7 +248,8 @@ create_gadget_parameter_set()
     };
 
     static ParameterEnum WindModelEnum [] = {
-        {"subgrid", WIND_SUBGRID}, /* the vanilla model of SH03, in which winds are included by returning energy to the star forming regions. This cools away and is ineffective.*/
+        {"subgrid", WIND_SUBGRID}, /* If this is true, winds are spawned from the star forming gas.
+                                      If false, they are spawned from neighbours of the star particle.*/
         {"decouple", WIND_DECOUPLE_SPH}, /* Specifies that wind particles are created temporarily decoupled from the gas dynamics */
         {"halo", WIND_USE_HALO}, /* Wind speeds depend on the halo circular velocity*/
         {"fixedefficiency", WIND_FIXED_EFFICIENCY}, /* Winds have a fixed efficiency and thus fixed wind speed*/
@@ -310,9 +313,9 @@ create_gadget_parameter_set()
      * In small boxes this may be too small.*/
     param_declare_double(ps, "QSOMaxMass", OPTIONAL, 1000, "Maximum mass of a halo potentially hosting a quasar in internal mass units.");
     param_declare_double(ps, "QSOMinMass", OPTIONAL, 100, "Minimum mass of a halo potentially hosting a quasar in internal mass units.");
-    param_declare_double(ps, "QSOMeanBubble", OPTIONAL, 30000, "Mean size of the ionizing bubble around a quasar. By default 30 Mpc.");
+    param_declare_double(ps, "QSOMeanBubble", OPTIONAL, 20000, "Mean size of the ionizing bubble around a quasar. By default 20 Mpc/h = 28 Mpc. 0807.2799");
     param_declare_double(ps, "QSOVarBubble", OPTIONAL, 0, "Variance of the ionizing bubble around a quasar. By default zero so all bubbles are the same size");
-    param_declare_double(ps, "QSOHeIIIReionFinishFrac", OPTIONAL, 0.95, "Reionization fraction at which all particles are flash-reionized instead of having quasar bubbles placed.");
+    param_declare_double(ps, "QSOHeIIIReionFinishFrac", OPTIONAL, 0.995, "Reionization fraction at which all particles are flash-reionized instead of having quasar bubbles placed.");
 
     /* Parameters for the metal return model*/
     param_declare_double(ps, "MetalsSn1aN0", OPTIONAL, 1.3e-3, "Overall rate of SN1a per Msun");

@@ -58,7 +58,12 @@ static struct SFRParams
     double QuickLymanAlphaTempThresh;
     /* Number of stars to create from each gas particle*/
     int Generations;
-
+    /* The temperature boost from reionisation. Following 1807.09282,
+     * we use a fixed, density independent value of 20000 K. I also tried
+     * their eq. 3-4 but found that for this low resolution (of the UV grid) the
+     * density gradients were too small and Treion was only 10 K.
+     */
+    double HIReionTemp;
     /* Input files for the various cooling modules*/
     char TreeCoolFile[100];
     char MetalCoolFile[100];
@@ -66,7 +71,6 @@ static struct SFRParams
     /* File with the helium reionization table*/
     char ReionHistFile[100];
 } sfr_params;
-
 
 int get_generations(void)
 {
@@ -99,7 +103,7 @@ static void cooling_direct(int i, const double a3inv, const double hubble, const
 static void cooling_relaxed(int i, double dtime, const double a3inv, struct sfr_eeqos_data sfr_data, const struct UVBG * const GlobalUVBG);
 
 static int make_particle_star(int child, int parent, int placement);
-static int starformation(int i, double *localsfr, double * sum_sm, MyFloat * GradRho, const double a3inv, const double hubble, const struct UVBG * const GlobalUVBG);
+static int starformation(int i, double *localsfr, MyFloat * sm_out, MyFloat * GradRho, const double a3inv, const double hubble, const struct UVBG * const GlobalUVBG);
 static int quicklyastarformation(int i, const double a3inv);
 static double get_sfr_factor_due_to_selfgravity(int i);
 static double get_sfr_factor_due_to_h2(int i, MyFloat * GradRho);
@@ -133,7 +137,7 @@ void set_sfr_params(ParameterSet * ps)
         /*Lyman-alpha forest parameters*/
         sfr_params.QuickLymanAlphaProbability = param_get_double(ps, "QuickLymanAlphaProbability");
         sfr_params.QuickLymanAlphaTempThresh = param_get_double(ps, "QuickLymanAlphaTempThresh");
-
+        sfr_params.HIReionTemp = param_get_double(ps, "HIReionTemp");
         /* File names*/
         param_get_string2(ps, "TreeCoolFile", sfr_params.TreeCoolFile, sizeof(sfr_params.TreeCoolFile));
         param_get_string2(ps, "UVFluctuationfile", sfr_params.UVFluctuationFile, sizeof(sfr_params.UVFluctuationFile));
@@ -152,10 +156,15 @@ cooling_and_starformation(ActiveParticles * act, ForceTree * tree, MyFloat * Gra
     /*This is a queue for the new stars and their parents, so we can reallocate the slots after the main cooling loop.*/
     int * NewStars = NULL;
     int * NewParents = NULL;
-    int NumNewStar = 0;
+    int64_t NumNewStar = 0, NumMaybeWind = 0;
+    int * MaybeWind = NULL;
+    MyFloat * StellarMass = NULL;
+
     size_t *nqthrsfr = ta_malloc("nqthrsfr", size_t, nthreads);
     int **thrqueuesfr = ta_malloc("thrqueuesfr", int *, nthreads);
     int **thrqueueparent = ta_malloc("thrqueueparent", int *, nthreads);
+    size_t *nqthrwind = NULL;
+    int **thrqueuewind = NULL;
 
     /*Need to capture this so that when NumActiveParticle increases during the loop
      * we don't add extra loop iterations on particles with invalid slots.*/
@@ -168,6 +177,14 @@ cooling_and_starformation(ActiveParticles * act, ForceTree * tree, MyFloat * Gra
         gadget_setup_thread_arrays(NewStars, thrqueuesfr, nqthrsfr, nactive, nthreads);
         NewParents = mymalloc2("NewParents", nactive * sizeof(int) * nthreads);
         gadget_setup_thread_arrays(NewParents, thrqueueparent, nqthrsfr, nactive, nthreads);
+    }
+
+    if(All.WindOn && winds_are_subgrid()) {
+        nqthrwind = ta_malloc("nqthrwind", size_t, nthreads);
+        thrqueuewind = ta_malloc("thrqueuewind", int *, nthreads);
+        StellarMass = mymalloc("StellarMass", SlotsManager->info[0].size * sizeof(MyFloat));
+        MaybeWind = mymalloc("MaybeWind", nactive * sizeof(int) * nthreads);
+        gadget_setup_thread_arrays(MaybeWind, thrqueuewind, nqthrwind, nactive, nthreads);
     }
 
     /* Get the global UVBG for this redshift. */
@@ -203,18 +220,28 @@ cooling_and_starformation(ActiveParticles * act, ForceTree * tree, MyFloat * Gra
 
             if(shall_we_star_form) {
                 int newstar = -1;
+                MyFloat sm = 0;
                 if(sfr_params.QuickLymanAlphaProbability > 0) {
                     /*New star is always the same particle as the parent for quicklya*/
                     newstar = p_i;
-                    sum_sm += P[i].Mass;
+                    sum_sm += P[p_i].Mass;
+                    sm = P[p_i].Mass;
                 } else {
-                    newstar = starformation(p_i, &localsfr, &sum_sm, GradRho, a3inv, hubble, &GlobalUVBG);
+                    newstar = starformation(p_i, &localsfr, &sm, GradRho, a3inv, hubble, &GlobalUVBG);
+                    sum_sm += P[p_i].Mass * (1 - exp(-sm/P[p_i].Mass));
                 }
                 /*Add this particle to the stellar conversion queue if necessary.*/
                 if(newstar >= 0) {
                     thrqueuesfr[tid][nqthrsfr[tid]] = newstar;
                     thrqueueparent[tid][nqthrsfr[tid]] = p_i;
                     nqthrsfr[tid]++;
+                }
+                /* Add this particle to the queue for consideration to spawn a wind.
+                 * Only for subgrid winds. */
+                if(nqthrwind && newstar < 0) {
+                    thrqueuewind[tid][nqthrwind[tid]] = p_i;
+                    StellarMass[P[p_i].PI] = sm;
+                    nqthrwind[tid]++;
                 }
             }
             else
@@ -223,12 +250,25 @@ cooling_and_starformation(ActiveParticles * act, ForceTree * tree, MyFloat * Gra
     }
 
     report_memory_usage("SFR");
+
+    walltime_measure("/Cooling/Cooling");
+
+    /* Do subgrid winds*/
+    if(All.WindOn && winds_are_subgrid()) {
+        NumMaybeWind = gadget_compact_thread_arrays(MaybeWind, thrqueuewind, nqthrwind, nthreads);
+        winds_subgrid(MaybeWind, NumMaybeWind, All.Time, hubble, tree, StellarMass);
+        myfree(MaybeWind);
+        myfree(StellarMass);
+        ta_free(thrqueuewind);
+        ta_free(nqthrwind);
+    }
+
     /*Merge step for the queue.*/
     if(NewStars) {
         NumNewStar = gadget_compact_thread_arrays(NewStars, thrqueuesfr, nqthrsfr, nthreads);
-        int NumNewParent = gadget_compact_thread_arrays(NewParents, thrqueueparent, nqthrsfr, nthreads);
+        int64_t NumNewParent = gadget_compact_thread_arrays(NewParents, thrqueueparent, nqthrsfr, nthreads);
         if(NumNewStar != NumNewParent)
-            endrun(3,"%d new stars, but %d new parents!\n",NumNewStar, NumNewParent);
+            endrun(3,"%lu new stars, but %lu new parents!\n",NumNewStar, NumNewParent);
         /*Shrink star memory as we keep it for the wind model*/
         NewStars = myrealloc(NewStars, sizeof(int) * NumNewStar);
     }
@@ -237,7 +277,9 @@ cooling_and_starformation(ActiveParticles * act, ForceTree * tree, MyFloat * Gra
     ta_free(thrqueuesfr);
     ta_free(nqthrsfr);
 
-    walltime_measure("/Cooling/Cooling");
+
+    if(!All.StarformationOn)
+        return;
 
     /*Get some empty slots for the stars*/
     int firststarslot = SlotsManager->info[4].size;
@@ -267,9 +309,6 @@ cooling_and_starformation(ActiveParticles * act, ForceTree * tree, MyFloat * Gra
         else
             stars_spawned++;
     }
-
-    if(!All.StarformationOn)
-        return;
 
     /*Done with the parents*/
     myfree(NewParents);
@@ -311,7 +350,7 @@ cooling_and_starformation(ActiveParticles * act, ForceTree * tree, MyFloat * Gra
     walltime_measure("/Cooling/StarFormation");
 
     /* Now apply the wind model using the list of new stars.*/
-    if(All.WindOn)
+    if(All.WindOn && !winds_are_subgrid())
         winds_and_feedback(NewStars, NumNewStar, All.Time, hubble, tree);
 
     myfree(NewStars);
@@ -393,14 +432,25 @@ cooling_direct(int i, const double a3inv, const double hubble, const struct UVBG
 
     double ne = SPHP(i).Ne;	/* electron abundance (gives ionization state and mean molecular weight) */
 
-    const double enttou = pow(SPH_EOMDensity(&SPHP(i)) * a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
+    const double enttou = pow(SPHP(i).Density * a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
 
     /* Current internal energy including adiabatic change*/
     double uold = SPHP(i).Entropy * enttou;
 
     double redshift = 1./All.Time - 1;
     struct UVBG uvbg = get_local_UVBG(redshift, GlobalUVBG, P[i].Pos, PartManager->CurrentParticleOffset);
-    double unew = DoCooling(redshift, uold, SPHP(i).Density * a3inv, dtime, &uvbg, &ne, SPHP(i).Metallicity, All.MinEgySpec, P[i].HeIIIionized);
+    double lasttime = exp(loga_from_ti(P[i].Ti_drift - dti_from_timebin(P[i].TimeBin)));
+    double lastred = 1/lasttime - 1;
+    double unew;
+    /* The particle reionized this timestep, bump the temperature to the HI reionization temperature.
+     * We only do this for non-star-forming gas.*/
+    if(sfr_params.HIReionTemp > 0 && uvbg.zreion > redshift && uvbg.zreion < lastred) {
+        /* Note we can assume it is neutral before it reionizes*/
+        const double u_to_temp_fac = (4 / (8 - 5 * (1 - HYDROGEN_MASSFRAC))) * PROTONMASS / BOLTZMANN * GAMMA_MINUS1 * All.UnitEnergy_in_cgs / All.UnitMass_in_g;
+        unew = sfr_params.HIReionTemp / u_to_temp_fac;
+    }
+    else
+        unew = DoCooling(redshift, uold, SPHP(i).Density * a3inv, dtime, &uvbg, &ne, SPHP(i).Metallicity, All.MinEgySpec, P[i].HeIIIionized);
 
     SPHP(i).Ne = ne;
     /* Update the entropy. This is done after synchronizing kicks and drifts, as per run.c.*/
@@ -437,7 +487,7 @@ sfreff_on_eeqos(const struct sph_particle_data * sph, const double a3inv)
         double redshift = pow(a3inv, 1./3.)-1;
         struct UVBG uvbg = get_global_UVBG(redshift);
         double egyeff = get_egyeff(redshift, sph->Density, &uvbg);
-        const double enttou = pow(sph->EgyWtDensity * a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
+        const double enttou = pow(sph->Density * a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
         double unew = sph->Entropy * enttou;
         /* 0.5 dex = 10^0.5 = 3.2 */
         if(unew >= egyeff * 3.2)
@@ -459,8 +509,6 @@ double get_neutral_fraction_sfreff(double redshift, struct particle_data * partd
     if(!All.StarformationOn || sfr_params.QuickLymanAlphaProbability > 0 || !sfreff_on_eeqos(sphdata, All.cf.a3inv)) {
         /*This gets the neutral fraction for standard gas*/
         double eomdensity = sphdata->Density;
-        if(DensityIndependentSphOn())
-            eomdensity  = sphdata->EgyWtDensity;
         double InternalEnergy = sphdata->Entropy / GAMMA_MINUS1 * pow(eomdensity * All.cf.a3inv, GAMMA_MINUS1);
         nh0 = GetNeutralFraction(InternalEnergy, physdens, &uvbg, sphdata->Ne);
     }
@@ -490,8 +538,6 @@ double get_helium_neutral_fraction_sfreff(int ion, double redshift, struct parti
     if(!All.StarformationOn || sfr_params.QuickLymanAlphaProbability > 0 || !sfreff_on_eeqos(sphdata, All.cf.a3inv)) {
         /*This gets the neutral fraction for standard gas*/
         double eomdensity = sphdata->Density;
-        if(DensityIndependentSphOn())
-            eomdensity  = sphdata->EgyWtDensity;
         double InternalEnergy = sphdata->Entropy / GAMMA_MINUS1 * pow(eomdensity * All.cf.a3inv, GAMMA_MINUS1);
         helium = GetHeliumIonFraction(ion, InternalEnergy, physdens, &uvbg, sphdata->Ne);
     }
@@ -542,7 +588,7 @@ static void
 cooling_relaxed(int i, double dtime, const double a3inv, struct sfr_eeqos_data sfr_data, const struct UVBG * const GlobalUVBG)
 {
     const double egyeff = sfr_params.EgySpecCold * sfr_data.cloudfrac + (1 - sfr_data.cloudfrac) * sfr_data.egyhot;
-    const double Density = SPH_EOMDensity(&SPHP(i));
+    const double Density = SPHP(i).Density;
     const double densityfac = pow(Density * a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
     double egycurrent = SPHP(i).Entropy * densityfac;
     double trelax = sfr_data.trelax;
@@ -581,7 +627,7 @@ quicklyastarformation(int i, const double a3inv)
     if(SPHP(i).Density <= sfr_params.OverDensThresh)
         return 0;
 
-    const double enttou = pow(SPH_EOMDensity(&SPHP(i)) * a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
+    const double enttou = pow(SPHP(i).Density * a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
     double unew = SPHP(i).Entropy * enttou;
 
     const double u_to_temp_fac = (4 / (8 - 5 * (1 - HYDROGEN_MASSFRAC))) * PROTONMASS / BOLTZMANN * GAMMA_MINUS1 * All.UnitEnergy_in_cgs / All.UnitMass_in_g;
@@ -602,7 +648,7 @@ quicklyastarformation(int i, const double a3inv)
  * The star slot is not actually created here, but a particle for it is.
  */
 static int
-starformation(int i, double *localsfr, double * sum_sm, MyFloat * GradRho, const double a3inv, const double hubble, const struct UVBG * const GlobalUVBG)
+starformation(int i, double *localsfr, MyFloat * sm_out, MyFloat * GradRho, const double a3inv, const double hubble, const struct UVBG * const GlobalUVBG)
 {
     /*  the proper time-step */
     double dloga = get_dloga_for_bin(P[i].TimeBin, P[i].Ti_drift);
@@ -615,12 +661,12 @@ starformation(int i, double *localsfr, double * sum_sm, MyFloat * GradRho, const
 
     double sm = smr * dtime;
 
+    *sm_out = sm;
     double p = sm / P[i].Mass;
 
     /* convert to Solar per Year.*/
     SPHP(i).Sfr = smr * (All.UnitMass_in_g / SOLAR_MASS) / (All.UnitTime_in_s / SEC_PER_YEAR);
     SPHP(i).Ne = sfr_data.ne;
-    *sum_sm += P[i].Mass * (1 - exp(-p));
     *localsfr += SPHP(i).Sfr;
 
     const double w = get_random_number(P[i].ID);
@@ -649,9 +695,6 @@ starformation(int i, double *localsfr, double * sum_sm, MyFloat * GradRho, const
      * that formed it if it is still around*/
     if(!form_star || newstar != i) {
         SPHP(i).Metallicity += (1-w) * METAL_YIELD * frac / sfr_params.Generations;
-        if(All.WindOn) {
-            winds_make_after_sf(i, sm, All.Time);
-        }
     }
     return newstar;
 }
@@ -678,7 +721,7 @@ struct sfr_eeqos_data get_sfr_eeqos(struct particle_data * part, struct sph_part
      * gadget-p doesn't have this cap.
      * without the cap sm can be bigger than cloudmass.
     */
-    if(data.tsfr < dtime)
+    if(data.tsfr < dtime && dtime > 0)
         data.tsfr = dtime;
 
     double redshift = 1./All.Time - 1;
@@ -742,6 +785,8 @@ void init_cooling_and_star_formation(int CoolingOn)
     coolunits.density_in_phys_cgs = All.UnitDensity_in_cgs * All.CP.HubbleParam * All.CP.HubbleParam;
     coolunits.uu_in_cgs = All.UnitEnergy_in_cgs / All.UnitMass_in_g;
     coolunits.tt_in_s = All.UnitTime_in_s / All.CP.HubbleParam;
+    /* Get mean cosmic baryon density for photoheating rate from long mean free path photons */
+    coolunits.rho_crit_baryon = 3 * pow(All.CP.HubbleParam * HUBBLE,2) * All.CP.OmegaBaryon / (8 * M_PI * GRAVITY);
 
     /* mean molecular weight assuming ZERO ionization NEUTRAL GAS*/
     double meanweight = 4.0 / (1 + 3 * HYDROGEN_MASSFRAC);
