@@ -192,7 +192,7 @@ runfof(int RestartSnapNum)
     DomainDecomp ddecomp[1] = {0};
     init(RestartSnapNum, ddecomp);          /* ... read in initial model */
 
-    FOFGroups fof = fof_fof(ddecomp, All.BoxSize, MPI_COMM_WORLD);
+    FOFGroups fof = fof_fof(ddecomp, All.BoxSize, 1, MPI_COMM_WORLD);
     fof_save_groups(&fof, RestartSnapNum, MPI_COMM_WORLD);
     fof_finish(&fof);
 }
