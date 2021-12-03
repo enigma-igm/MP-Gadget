@@ -1,0 +1,26 @@
+Steps to run a MP-Gadget sims
+
+Prerequisites:
+- CAMB https://github.com/cmbant/CAMB.git
+- MPI https://www.open-mpi.org/software/ompi/v4.1/
+- GSL https://mirror.ibcp.fr/pub/gnu/gsl/gsl-latest.tar.gz
+
+1. Generate transfer functions using CAMB
+ - Run something like camb_pk.py script and spit out z = 1000+/-dz TFs
+2. Generate initial conditions using CICASS
+ - Run vbc_transfer to evolve transfer function to z = 200.
+   e.g. ./transfer.x -B1.0 -N128 -V30 -Z200 -D3 -Scamb_cdm_transfer_z1000.dat
+ - Run makeCosICs to output ICs
+   first copy over the vbc_transfer output: cp IC_outputs/initSimCartZI200.0_Vbc30.0_128_1.0.dat ../makeCosICs
+   e.g. ./genICs.x -L1.0 -V30 -N128 -G128 -Z200 -o. -bcdm_1Mpc_128_v30
+3. Transform ICs into MP-Gadget format
+ - prepare a paramfile.genic, see examples at /mnt/quasar/fdavies/small-scale-reion/mp-gadget_params/params_fast_128 (or 256 or 512)
+   FileWithInputSpectrum is actually the CICASS IC file (.dat)
+ - run MP-GenIC-CICASS
+4. Run the MP-Gadget sim
+ - prepare a paramfile.gadget, see examples /mnt/quasar/fdavies/small-scale-reion/mp-gadget_params/params_fast_128 (or 256 or 512)
+ - run with mpirun
+   Add '1' to the end of the call to continue from the last snapshot,
+   or '2' and then 'N' to continue from the Nth snapshot
+
+See /mnt/quasar/fdavies/small-scale-reion/mp-gadget_params/run_fast_512.sh for examples on how to run the MP codes.
