@@ -115,7 +115,9 @@ int main(int argc, char **argv)
           {
               fread(gas_pos[n], sizeof(float), 3, fd);
           }
-          printf("Read gadget Pos1 %f %f %f\n",gas_pos[1][0],gas_pos[1][1],gas_pos[1][2]);
+          for (n=0; n<8; n++) {
+          printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
+          }
       }
       else if (k == 1)
       {
@@ -147,7 +149,7 @@ int main(int argc, char **argv)
           {
               fread(gas_vel[n], sizeof(float), 3, fd);
           }
-          printf("Read gadget Vel1\n");
+          printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
       }
       else if (k == 1)
       {
@@ -155,7 +157,7 @@ int main(int argc, char **argv)
           {
               fread(dm_vel[n], sizeof(float), 3, fd);
           }
-          printf("Read gadget Vel2\n");
+          printf("Read gadget Vel2 %f %f %f\n",dm_vel[1][0],dm_vel[1][1],dm_vel[1][2]);
       }
       else
           fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
@@ -259,14 +261,6 @@ int main(int argc, char **argv)
 
   /*Space for both CDM and baryons*/
   struct ic_part_data * ICP = (struct ic_part_data *) mymalloc("PartTable", (NumPartCDM + All2.ProduceGas * NumPartGas)*sizeof(struct ic_part_data));
-    
-  // ASSIGN CICASS QUANTITIES TO DM PARTICLES
-  for (i = 0; i < NumPartCDM; i++) {
-      for (j = 0; j < 3; j++) {
-          ICP[i].Pos[j] = dm_pos[i][j];
-          ICP[i].Vel[j] = dm_vel[i][j]*sqrt(All2.TimeIC);
-      }
-  }
 
   /* If we have incoherent glass files, we need to store both the particle tables
    * to ensure that there are no close particle pairs*/
@@ -288,13 +282,21 @@ int main(int argc, char **argv)
 //    if(All2.MakeGlassGas || All2.MakeGlassCDM)
 //        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.UnitLength_in_cm, All2.OutputDir);
 //  }
+    
+  // ASSIGN CICASS QUANTITIES TO DM PARTICLES
+  for (i = 0; i < NumPartCDM; i++) {
+      for (j = 0; j < 3; j++) {
+          ICP[i].Pos[j] = dm_pos[i][j];
+          ICP[i].Vel[j] = dm_vel[i][j]*sqrt(All2.TimeIC);
+      }
+  }
 
   /*Write initial positions into ICP struct (for CDM and gas)*/
-//  int j,k;
-//  for(j=0; j<NumPartCDM+NumPartGas; j++)
-//      for(k=0; k<3; k++)
-//          ICP[j].PrePos[k] = ICP[j].Pos[k];
-//
+  //int j,k;
+  for(j=0; j<NumPartCDM+NumPartGas; j++)
+      for(k=0; k<3; k++)
+          ICP[j].PrePos[k] = ICP[j].Pos[k];
+
   if(NumPartCDM > 0) {
     //displacement_fields(pm, DMType, ICP, NumPartCDM, &CP, All2);
 
