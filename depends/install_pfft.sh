@@ -14,7 +14,7 @@ mkdir $TMP
 ROOT=`dirname $0`/../
 if ! [ -f $ROOT/depends/pfft-$PFFT_VERSION.tar.gz ]; then
 wget https://github.com/rainwoodman/pfft/releases/download/$PFFT_VERSION/pfft-$PFFT_VERSION.tar.gz \
-    -O $ROOT/depends/pfft-$PFFT_VERSION.tar.gz 
+    -O $ROOT/depends/pfft-$PFFT_VERSION.tar.gz  --no-check-certificate
 fi
 
 gzip -dc $ROOT/depends/pfft-$PFFT_VERSION.tar.gz | tar xf - -C $TMP
