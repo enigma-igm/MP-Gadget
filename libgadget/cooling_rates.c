@@ -1178,7 +1178,7 @@ get_individual_cooling(enum CoolProcess process, double density, double ienergy,
   Note this is *not* the electron density in cgs units, as used internally.
  */
 double
-get_heatingcooling_rate(double density, double ienergy, double helium, double redshift, double metallicity, const struct UVBG * uvbg, double *ne_equilib)
+get_heatingcooling_rate(double density, double ienergy, double helium, double redshift, double metallicity, const struct UVBG * uvbg, double *ne_equilib, struct cooling_units cu)
 {
     double logt;
     double ne = get_equilib_ne(density, ienergy, helium, &logt, uvbg, *ne_equilib);
@@ -1243,8 +1243,8 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
     if (CoolingParams.XrayHeatingFactor > 0) {
         double SFR = 0.01376 * pow(1+redshift,3.26) / (1+pow((1+redshift)/2.59,5.68)); // star formation history fit from Robertson+15
         SFR *= pow(3.086e24,-3.0) * pow(1+redshift,3.0); // convert SFR units from comoving Mpc^-3 to proper cm^-3
-        double avg_nh = 0.049*pow(1+redshift,3)*3*pow(0.675*HUBBLE,2.0)/(8*M_PI*GRAVITY)*(1-helium)/PROTONMASS; // HACKED IN average nH
-        Heat += 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR / (nh*avg_nh); // X-ray heating rate, scaled by fX * fabs = XrayHeatingFactor parameter.
+        double avg_nh = cu.rho_crit_baryon*pow(1+redshift,3)*(1-helium)/PROTONMASS; // average nH
+        Heat += 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR / (nh*avg_nh); // X-ray heating rate, scaled by XrayHeatingFactor parameter (= fX fabs / 0.2)
     }
 
     /*Set external equilibrium electron density*/

@@ -56,7 +56,7 @@ void init_cooling(char * TreeCoolFile, char * RecFastFile, char * MetalCoolFile,
 static double
 get_lambdanet(double rho, double u, double redshift, double Z, struct UVBG * uvbg, double * ne_guess, int isHeIIIionized)
 {
-    double LambdaNet = get_heatingcooling_rate(rho, u, 1 - HYDROGEN_MASSFRAC, redshift, Z, uvbg, ne_guess);
+    double LambdaNet = get_heatingcooling_rate(rho, u, 1 - HYDROGEN_MASSFRAC, redshift, Z, uvbg, ne_guess, coolunits);
     if(!isHeIIIionized) {
         /* get_long_mean_free_path_heating returns the heating in units of erg/s/cm^3,
          * the factor of the mean density converts from erg/s/cm^3 to erg/s/g */
@@ -163,7 +163,7 @@ double GetCoolingTime(double redshift, double u_old, double rho, struct UVBG * u
     u_old *= coolunits.uu_in_cgs;
 
     /* Note: this does not include the long mean free path heating from helium reionization*/
-    double LambdaNet = get_heatingcooling_rate(rho, u_old, 1 - HYDROGEN_MASSFRAC, redshift, Z, uvbg, ne_guess);
+    double LambdaNet = get_heatingcooling_rate(rho, u_old, 1 - HYDROGEN_MASSFRAC, redshift, Z, uvbg, ne_guess, coolunits);
 
     if(LambdaNet >= 0)		/* ups, we have actually heating due to UV background */
         return 0;

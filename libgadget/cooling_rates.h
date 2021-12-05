@@ -95,7 +95,7 @@ double get_ne_by_nh(double density, double ienergy, double helium, const struct 
   helium is a mass fraction, 1 - HYDROGEN_MASSFRAC = 0.24 for primordial gas.
   Returns heating - cooling.
  */
-double get_heatingcooling_rate(double density, double ienergy, double helium, double redshift, double metallicity, const struct UVBG * uvbg, double * ne_equilib);
+double get_heatingcooling_rate(double density, double ienergy, double helium, double redshift, double metallicity, const struct UVBG * uvbg, double * ne_equilib, struct cooling_units cu);
 
 enum CoolProcess {
     RECOMB,
