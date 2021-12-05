@@ -44,7 +44,6 @@ show_backtrace(void)
         /* CHILD */
         char parent[16];
         char buf[512];
-        seteuid(0);
         close(STDIN_FILENO);
         close(STDOUT_FILENO);
         dup2(pipefd[1],STDOUT_FILENO);
@@ -98,6 +97,8 @@ show_backtrace(void)
     return 0;
 }
 
+static int ShowBacktrace;
+
 static void
 OsSigHandler(int no)
 {
@@ -105,13 +106,13 @@ OsSigHandler(int no)
     char buf[128];
     sprintf(buf, btline, no);
     write(STDOUT_FILENO, buf, strlen(buf));
-
-    show_backtrace();
-    exit(-no);
+    if(ShowBacktrace)
+        show_backtrace();
+    MPI_Abort(MPI_COMM_WORLD, no);
 }
 
 static void
-init_stacktrace()
+init_stacktrace(void)
 {
     struct sigaction act, oact;
 
@@ -128,8 +129,9 @@ init_stacktrace()
 }
 
 void
-init_endrun()
+init_endrun(int backtrace)
 {
+    ShowBacktrace = backtrace;
     init_stacktrace();
 }
 
@@ -137,7 +139,7 @@ init_endrun()
  *
  *  if where > 0, a stacktrace is printed per rank calling endrun.
  *  if where <= 0, the function shall be called by all ranks collectively.
- *    and only the root rank prints the error. 
+ *    and only the root rank prints the error.
  *
  *  No barrier is applied.
  */
@@ -147,12 +149,13 @@ endrun(int where, const char * fmt, ...)
 
     va_list va;
     va_start(va, fmt);
-    MPIU_Tracev(MPI_COMM_WORLD, where, fmt, va);
+    MPIU_Tracev(MPI_COMM_WORLD, where, 1, fmt, va);
     va_end(va);
     int ThisTask;
     MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
     if(ThisTask == 0 || where > 0) {
-        show_backtrace();
+        if(ShowBacktrace)
+            show_backtrace();
         MPI_Abort(MPI_COMM_WORLD, where);
     }
     /* This is here so the compiler knows this
@@ -173,7 +176,7 @@ void message(int where, const char * fmt, ...)
 {
     va_list va;
     va_start(va, fmt);
-    MPIU_Tracev(MPI_COMM_WORLD, where, fmt, va);
+    MPIU_Tracev(MPI_COMM_WORLD, where, 0, fmt, va);
     va_end(va);
 }
 

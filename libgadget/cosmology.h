@@ -10,14 +10,15 @@ typedef struct {
     double OmegaCDM; /* CDM density, derived from Omega0 and OmegaBaryon */
     double OmegaG; /* Photon density, derived from T_CMB0 */
     double OmegaK; /* Curvature density, derived from Omega0 and OmegaLambda */
-    double OmegaLambda;  /* vaccum energy density relative to crictical density (at z=0) */
+    double OmegaLambda;  /* vacuum energy density relative to crictical density (at z=0) */
     double Omega_fld; /*Energy density of dark energy fluid at z=0*/
     double w0_fld; /*Dark energy equation of state parameter*/
     double wa_fld; /*Dark energy equation of state evolution parameter*/
     double Omega_ur; /*Extra radiation density: either a sterile neutrino or other dark radiation*/
     double OmegaBaryon;  /* baryon density in units of the critical density (at z=0) */
     double HubbleParam;  /* little `h', i.e. Hubble constant in units of 100 km/s/Mpc. */
-    double Hubble; /* 100 km/s/Mpc in whatever units we want*/
+    double Hubble; /* 100 km/s/Mpc in internal units*/
+    double UnitTime_in_s; /* Internal unit time in seconds*/
     int RadiationOn; /* flags whether to include the radiation density in the background */
     _omega_nu ONu;   /*Structure for storing massive neutrino densities*/
     double MNu[3]; /*Neutrino masses in eV*/
@@ -39,11 +40,11 @@ double function_of_k_eval(FunctionOfK * fk, double k);
 double function_of_k_tophat_sigma(FunctionOfK * fk, double R);
 
 /*Hubble function at scale factor a, in dimensions of CP.Hubble*/
-double hubble_function(double a);
+double hubble_function(const Cosmology * CP, double a);
 /* Linear theory growth factor between astart and aend. */
-double GrowthFactor(double astart, double aend);
+double GrowthFactor(Cosmology * CP, double astart, double aend);
 /*Note this is only used in GenIC*/
-double F_Omega(double a);
+double F_Omega(Cosmology * CP, double a);
 
 /*Initialise the derived parts of the cosmology*/
 void init_cosmology(Cosmology *CP, double TimeBegin);

@@ -5,7 +5,7 @@ CONFIG ?= ../Options.mk
 include $(CONFIG)
 
 INCL=../libgadget/config.h \
-    power.h allvars.h thermal.h proto.h
+    power.h allvars.h thermal.h proto.h pmesh.h
 
 TESTED = power thermal
 TESTBIN := $(TESTED:%=.objs/test_%) $(MPI_TESTED:%=.objs/test_%)
@@ -14,8 +14,7 @@ MPISUITE = $(MPI_TESTED:%=test_%)
 
 include ../Makefile.rules
 
-OBJS = power.o allvars.o \
-  	zeldovich.o glass.o save.o thermal.o
+OBJS = power.o zeldovich.o glass.o save.o thermal.o
 
 OBJS := $(OBJS:%.o=.objs/%.o)
 
@@ -38,7 +37,7 @@ test : build-tests
 	done; exit $$err
 
 libgenic.a: $(OBJS)
-	$(AR) rv $@ $(OBJS)
+	$(AR) r $@ $(OBJS)
 
 clean:
 	rm -rf .objs libgenic.a

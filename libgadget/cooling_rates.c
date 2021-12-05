@@ -21,6 +21,7 @@
         get_temp() - gets the temperature from the density and internal energy.
         get_heatingcooling_rate() - gets the total (net) heating and cooling rate from density and internal energy.
         get_neutral_fraction_phys_cgs() - gets the neutral fraction from the rate network given density and internal energy in physical cgs units.
+        get_helium_ion_fraction_phys_cgs() - gets the neutral fraction from the rate network given density and internal energy in physical cgs units.
         get_global_UVBG() - Interpolates the TreeCool table to a desired redshift and returns a struct UVBG.
     Two useful helper functions:
         get_equilib_ne() - gets the equilibrium electron density.
@@ -50,6 +51,7 @@
 */
 
 #include "cooling_rates.h"
+#include "cooling_qso_lightup.h"
 #include "cosmology.h"
 
 #include <omp.h>
@@ -63,9 +65,6 @@
 #include "utils/paramset.h"
 #include "utils/mymalloc.h"
 
-/* 1 eV in ergs*/
-#define eVinergs 1.60218e-12
-
 static struct cooling_params CoolingParams;
 
 static gsl_interp * GrayOpac;
@@ -73,7 +72,7 @@ static gsl_interp * GrayOpac;
 /*Tables for the self-shielding correction. Note these are not well-measured for z > 5!*/
 #define NGRAY 6
 /*  Gray Opacity for the Faucher-Giguere 2009 UVB. HM2018 is a little larger and would lead to a 10% higher self-shielding threshold.*/
-static double GrayOpac_ydata[NGRAY] = { 2.59e-18, 2.37e-18, 2.27e-18, 2.15e-18, 2.02e-18, 1.94e-18};
+static const double GrayOpac_ydata[NGRAY] = { 2.59e-18, 2.37e-18, 2.27e-18, 2.15e-18, 2.02e-18, 1.94e-18};
 static const double GrayOpac_zz[NGRAY] = {0, 1, 2, 3, 4, 5};
 
 /*Convenience structure bundling together the gsl interpolation routines.*/
@@ -224,22 +223,22 @@ z  xe  T
 */
 static void
 load_recfast(const char * RecFastFile) {
-    
+
     if(!CoolingParams.FreezeOutOn)
         return;
     FILE * fd = fopen(RecFastFile, "r");
     if(!fd)
         endrun(456, "Could not open recfast file at: '%s'\n", RecFastFile);
-    
+
     NRECFAST = 276; // placeholder
-    
+
     MPI_Bcast(&(NRECFAST), 1, MPI_INT, 0, MPI_COMM_WORLD);
 
     /*Allocate memory for the photon background table.*/
     xe_z = mymalloc("RecFastTable", 3 * NTreeCool * sizeof(double));
     xe_rf.ydata = xe_z + NRECFAST;
     t_rf.ydata = xe_z + 2*NRECFAST;
-    
+
     int ThisTask;
     MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
     if(ThisTask == 0)
@@ -250,18 +249,18 @@ load_recfast(const char * RecFastFile) {
             fscanf(fd,"%lf %lf %lf\n",&(xe_z[i]),&(xe_rf.ydata[i]),&(t_rf.ydata[i]));
             i++;
         }
-        
+
         fclose(fd);
     }
-    
+
     /*Broadcast data to other processors*/
     MPI_Bcast(xe_z, 3 * NRECFAST, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     /*Initialize the UVB redshift interpolation: reticulate the splines*/
     init_itp_type(xe_z, &xe_rf, NRECFAST);
     init_itp_type(xe_z, &t_rf, NRECFAST);
-    
+
     message(0, "Read %d lines z = %g - %g from file %s\n", NRECFAST, xe_z[0], xe_z[NRECFAST-1], RecFastFile);
-    
+
 }
 
 /*Get photo ionization rate for neutral Hydrogen*/
@@ -272,7 +271,7 @@ get_photo_rate(double redshift, struct itp_type * Gamma_tab)
         return 0;
     double log1z = log10(1+redshift);
     double photo_rate;
-    if (log1z >= Gamma_log1z[NTreeCool - 1])
+    if (NTreeCool < 1 || log1z >= Gamma_log1z[NTreeCool - 1])
         return 0;
     else if (log1z < Gamma_log1z[0])
         photo_rate = Gamma_tab->ydata[0];
@@ -321,26 +320,42 @@ struct UVBG get_global_UVBG(double redshift)
     if(!CoolingParams.PhotoIonizationOn)
         return GlobalUVBG;
 
+    /* Set the homogeneous reionization redshift as the point when the UVB switches on.*/
+    GlobalUVBG.zreion = pow(10,Gamma_log1z[NTreeCool - 1])-1;
+
+    if(CoolingParams.UVRedshiftThreshold >= 0.)
+        GlobalUVBG.zreion = CoolingParams.UVRedshiftThreshold;
+
+    /* if a threshold is set, disable UV bg above that redshift */
+    if(CoolingParams.UVRedshiftThreshold >= 0. && redshift > CoolingParams.UVRedshiftThreshold)
+        return GlobalUVBG;
+
+
     GlobalUVBG.gJH0 = get_photo_rate(redshift, &Gamma_HI);
     GlobalUVBG.gJHe0 = get_photo_rate(redshift, &Gamma_HeI);
     GlobalUVBG.gJHep = get_photo_rate(redshift, &Gamma_HeII);
 
     GlobalUVBG.epsH0 = get_photo_rate(redshift, &Eps_HI);
     GlobalUVBG.epsHe0 = get_photo_rate(redshift, &Eps_HeI);
-    GlobalUVBG.epsHep = get_photo_rate(redshift, &Eps_HeII);
-    
+    /* During helium reionization we have a model for the inhomogeneous non-equilibrium heating.
+     * To avoid double counting, remove the heating in the existing UVB*/
+    if(during_helium_reionization(redshift))
+        GlobalUVBG.epsHep = 0;
+    else
+        GlobalUVBG.epsHep = get_photo_rate(redshift, &Eps_HeII);
+
     /* if a threshold is set, disable UV bg above that redshift */
     if(CoolingParams.UVRedshiftThreshold >= 0. && redshift > CoolingParams.UVRedshiftThreshold) {
         double damp = exp(-25.0*(redshift-CoolingParams.UVRedshiftThreshold));
         GlobalUVBG.gJH0 *= damp;
         GlobalUVBG.gJHe0 *= damp;
         GlobalUVBG.gJHep *= damp;
-    
+
         GlobalUVBG.epsH0 *= damp;
         GlobalUVBG.epsHe0 *= damp;
         GlobalUVBG.epsHep *= damp;
     }
-    
+
     GlobalUVBG.self_shield_dens = self_shield_dens(redshift, &GlobalUVBG);
     return GlobalUVBG;
 }
@@ -720,7 +735,7 @@ scipy_optimize_fixed_point(double ne_init, double nh, double ienergy, double hel
             ne0 = 0;
     }
     if (!isfinite(ne0) || i == MAXITER)
-        endrun(1, "Ionization rate network failed to converge for nh = %g temp = %g helium=%g: last ne = %g (init=%g)\n", nh, get_temp_internal(ne0, ienergy, helium), helium, ne0, ne_init);
+        endrun(1, "Ionization rate network failed to converge for nh = %g temp = %g helium=%g ienergy=%g: last ne = %g (init=%g)\n", nh, get_temp_internal(ne0, ienergy, helium), helium, ienergy, ne0, ne_init);
     return ne0 * nh;
 }
 
@@ -1005,10 +1020,10 @@ set_cooling_params(ParameterSet * ps)
         CoolingParams.MinGasTemp = param_get_double(ps, "MinGasTemp");
         CoolingParams.UVRedshiftThreshold = param_get_double(ps, "UVRedshiftThreshold");
         CoolingParams.HydrogenHeatAmp = log10(param_get_double(ps, "HydrogenHeatAmp"));
-        
+
         /*Xray heating parameters*/
         CoolingParams.XrayHeatingFactor = param_get_double(ps, "XrayHeatingFactor");
-        
+
         /*Freezeout parameters*/
         CoolingParams.FreezeOutOn = param_get_int(ps, "FreezeOutOn");
 
@@ -1029,11 +1044,12 @@ init_cooling_rates(const char * TreeCoolFile, const char * RecFastFile, const ch
     CoolingParams.fBar = CP->OmegaBaryon / CP->OmegaCDM;
     CoolingParams.rho_crit_baryon = CP->OmegaBaryon * 3.0 * pow(CP->HubbleParam*HUBBLE,2.0) /(8.0*M_PI*GRAVITY);
 
-    /*Initialize the interpolation for the self-shielding module as a function of redshift.*/
-    GrayOpac = gsl_interp_alloc(gsl_interp_cspline,NGRAY);
+    /* Initialize the interpolation for the self-shielding module as a function of redshift.
+     * A crash has been observed in GSL with a cspline interpolator. */
+    GrayOpac = gsl_interp_alloc(gsl_interp_linear,NGRAY);
     gsl_interp_init(GrayOpac,GrayOpac_zz,GrayOpac_ydata, NGRAY);
 
-    if(strlen(TreeCoolFile) == 0) {
+    if(!TreeCoolFile || strnlen(TreeCoolFile,100) == 0) {
         CoolingParams.PhotoIonizationOn = 0;
         message(0, "No TreeCool file is provided. Cooling is broken. OK for DM only runs. \n");
     }
@@ -1042,7 +1058,7 @@ init_cooling_rates(const char * TreeCoolFile, const char * RecFastFile, const ch
         /* Load the TREECOOL into Gamma_HI->ydata, and initialise the interpolators*/
         load_treecool(TreeCoolFile);
     }
-    
+
     if (CoolingParams.FreezeOutOn == 1) {
         message(0, "Using RECFAST electron fraction from file %s\n", RecFastFile);
         load_recfast(RecFastFile);
@@ -1088,6 +1104,69 @@ init_cooling_rates(const char * TreeCoolFile, const char * RecFastFile, const ch
 
     /*Initialize the metal cooling table*/
     InitMetalCooling(MetalCoolFile);
+}
+
+/* Split out the Compton cooling*/
+double
+get_compton_cooling(double density, double ienergy, double helium, double redshift, double nebynh)
+{
+    double nh = density * (1 - helium);
+    double temp = get_temp_internal(nebynh, ienergy, helium);
+    /*Compton cooling in erg/s cm^3*/
+    double LambdaCmptn = -1*nebynh * cool_InverseCompton(temp, redshift) / nh;
+    return LambdaCmptn * pow(1 - helium, 2) * density / PROTONMASS;
+}
+
+/* Get an individual cooling or heating process. For tests.
+ */
+double
+get_individual_cooling(enum CoolProcess process, double density, double ienergy, double helium, const struct UVBG * uvbg, double *ne_equilib)
+{
+    double logt;
+    double ne = get_equilib_ne(density, ienergy, helium, &logt, uvbg, *ne_equilib);
+    double nh = density * (1 - helium);
+    double nebynh = ne/nh;
+    /*Faster than running the exp.*/
+    double temp = get_temp_internal(nebynh, ienergy, helium);
+    double photofac = self_shield_corr(nh, logt, uvbg->self_shield_dens);
+    double nH0 = nH0_internal(logt, ne, uvbg, photofac);
+    double nHp = nHp_internal(nH0);
+    /*The helium number fraction*/
+    double yy = helium / 4 / (1 - helium);
+    struct he_ions He = nHe_internal(nh, logt, ne, uvbg, photofac);
+    /*Put the abundances in units of nH to avoid underflows*/
+    He.nHep*= yy/nh;
+    He.nHe0*= yy/nh;
+    He.nHepp*= yy/nh;
+
+    /*Compton cooling in erg/s cm^3*/
+    double Lambda = 0;
+
+    if(process == FREEFREE) {
+        double cff = get_interpolated_recomb(logt, cool_freefree1, cool_FreeFree1);
+        if(CoolingParams.cooling == Enzo2Nyx) {
+            Lambda = -1*nebynh * (cff * (nHp + He.nHep) + cool_FreeFree(temp, 2) * He.nHepp);
+        } else {
+            /*The factor of (zz=2)^2 has been pulled out, so if we use the Spitzer gaunt factor we don't need
+            * to call the FreeFree function again.*/
+            Lambda = -1*nebynh * (cff * (nHp + He.nHep) + 4 * cff * He.nHepp);
+        }
+    } else if(process == HEAT) {
+            /*Total heating rate per proton in erg/s cm^3*/
+            Lambda = (nH0 * uvbg->epsH0 + He.nHe0 * uvbg->epsHe0 + He.nHep * uvbg->epsHep)/nh;
+    }
+    else if(process == RECOMB) {
+        Lambda = -1*nebynh * (get_interpolated_recomb(logt, cool_recombHp, cool_RecombHp) * nHp +
+            get_interpolated_recomb(logt, cool_recombHeP, cool_RecombHeP) * He.nHep +
+            get_interpolated_recomb(logt, cool_recombHePP, cool_RecombHePP) * He.nHepp);
+    }
+    else if(process == COLLIS) {
+        Lambda = -1*nebynh * (get_interpolated_recomb(logt, cool_collisH0, cool_CollisionalH0) * nH0 +
+            get_interpolated_recomb(logt, cool_collisHe0, cool_CollisionalHe0) * He.nHe0 +
+            get_interpolated_recomb(logt, cool_collisHeP, cool_CollisionalHeP) * He.nHep);
+    }
+
+    return Lambda * pow(1 - helium, 2) * density / PROTONMASS;
 }
 
 /*Get the total change in internal energy per unit time in erg/s/g for a given temperature (internal energy) and density.
@@ -1154,7 +1233,7 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
     double Heat = (nH0 * uvbg->epsH0 + He.nHe0 * uvbg->epsHe0 + He.nHep * uvbg->epsHep)/nh;
 
     Heat *= cool_he_reion_factor(density, helium, redshift);
-    
+
     // X-ray heating rate
     // Uses basic model from Furlanetto 2006
     // eps_X = 3.4x10^40 fX fabs rho_SFR
@@ -1167,7 +1246,7 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
         double avg_nh = 0.049*pow(1+redshift,3)*3*pow(0.675*HUBBLE,2.0)/(8*M_PI*GRAVITY)*(1-helium)/PROTONMASS; // HACKED IN average nH
         Heat += 3.4e40 * 0.2 * CoolingParams.XrayHeatingFactor * SFR / (nh*avg_nh); // X-ray heating rate, scaled by fX * fabs = XrayHeatingFactor parameter.
     }
-    
+
     /*Set external equilibrium electron density*/
     *ne_equilib = nebynh;
 
@@ -1178,7 +1257,7 @@ get_heatingcooling_rate(double density, double ienergy, double helium, double re
 
     //message(1, "Heat = %g Lambda = %g MetalCool = %g LC = %g LR = %g LFF = %g LCmptn = %g, ne = %g, nH0 = %g, nHp = %g, nHe0 = %g, nHep = %g, nHepp = %g, nh=%g, temp=%g, ienergy=%g\n", Heat, Lambda, MetalCooling, LambdaCollis, LambdaRecomb, LambdaFF, LambdaCmptn, nebynh, nH0, nHp, nHe0, nHep, nHepp, nh, temp, ienergy);
 
-    /* LambdaNet in erg/s cm^3, Density in protons/cm^3, PROTONMASS in protons/g.
+    /* LambdaNet in erg cm^3 /s, Density in protons/cm^3, PROTONMASS in protons/g.
      * Convert to erg/s/g*/
     return LambdaNet * pow(1 - helium, 2) * density / PROTONMASS;
 }
@@ -1197,7 +1276,7 @@ get_temp(double density, double ienergy, double helium, const struct UVBG * uvbg
     return get_temp_internal(ne/nh, ienergy, helium);
 }
 
-/*Get the neutral hydrogen fraction at a given temperature and density.
+/* Get the neutral hydrogen fraction at a given temperature and density.
 density is gas density in protons/cm^3
 Internal energy is in ergs/g.
 helium is a mass fraction.*/
@@ -1210,4 +1289,26 @@ get_neutral_fraction_phys_cgs(double density, double ienergy, double helium, con
     double photofac = self_shield_corr(nh, logt, uvbg->self_shield_dens);
     *ne_init = ne/nh;
     return nH0_internal(logt, ne, uvbg, photofac);
+}
+
+/* Get the helium ionization fractions at a given temperature and density.
+ * ion is 0, 1, 2 for He, He+ and He++
+density is gas density in protons/cm^3
+Internal energy is in ergs/g.
+helium is a mass fraction.*/
+double
+get_helium_ion_phys_cgs(int ion, double density, double ienergy, double helium, const struct UVBG * uvbg, double ne_init)
+{
+    double logt;
+    double ne = get_equilib_ne(density, ienergy, helium, &logt, uvbg, ne_init);
+    double yy = helium / 4 / (1 - helium);
+    double nh = density * (1-helium);
+    double photofac = self_shield_corr(nh, logt, uvbg->self_shield_dens);
+    struct he_ions He = nHe_internal(nh, logt, ne, uvbg, photofac);
+    if(ion == 0)
+        return yy * He.nHe0 / nh;
+    else if (ion == 1)
+        return yy * He.nHep / nh;
+    else
+        return yy * He.nHepp / nh;
 }

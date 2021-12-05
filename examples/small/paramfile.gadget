@@ -6,7 +6,6 @@ TreeCoolFile = ../TREECOOL_fg_june11
 MetalCoolFile = ../cooling_metal_UVB
 OutputList = 0.1,0.2,0.299,0.3,0.33333,0.4,0.5
 EnableAggregatedIO = 1
-Nmesh = 32
 # CPU time -limit
 
 TimeLimitCPU = 43000 #= 8 hours
@@ -26,6 +25,7 @@ HubbleParam = 0.697      # Hubble paramater (may be used for power spec paramete
 CoolingOn = 1
 StarformationOn = 1
 StarformationCriterion = density
+MetalReturnOn = 1
 DensityIndependentSphOn = 1
 RadiationOn = 1
 HydroOn = 1
@@ -89,7 +89,7 @@ FactorSN = 0.1
 FactorEVP = 1000.0
 
 WindOn = 1
-WindModel = ofjt10,decouple
+WindModel = ofjt10,isotropic
 WindEfficiency = 2.0
 WindEnergyFraction = 1.0
 WindSigma0 = 353.0 #km/s

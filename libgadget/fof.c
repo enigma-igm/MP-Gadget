@@ -8,14 +8,16 @@
 #include <sys/types.h>
 #include <gsl/gsl_math.h>
 #include <inttypes.h>
-#include <mpsort.h>
+#include <omp.h>
 
 #include "utils.h"
+#include "utils/mpsort.h"
 
 #include "walltime.h"
 #include "sfr_eff.h"
 #include "blackhole.h"
 #include "domain.h"
+#include "winds.h"
 
 #include "forcetree.h"
 #include "treewalk.h"
@@ -29,11 +31,6 @@
 
 #include "fof.h"
 
-/* Never change the primary link it is always DM. */
-#define FOF_PRIMARY_LINK_TYPES 2
-
-/* FIXME: convert this to a parameter */
-#define FOF_SECONDARY_LINK_TYPES (1+16+32)    // 2^type for the types linked to nearest primaries
 #define LARGE 1e29
 #define MAXITER 400
 
@@ -41,9 +38,12 @@ struct FOFParams
 {
     int FOFSaveParticles ; /* saving particles in the fof group */
     double MinFoFMassForNewSeed;	/* Halo mass required before new seed is put in */
+    double MinMStarForNewSeed; /* Minimum stellar mass required before new seed */
     double FOFHaloLinkingLength;
     double FOFHaloComovingLinkingLength; /* in code units */
     int FOFHaloMinLength;
+    int FOFPrimaryLinkTypes;
+    int FOFSecondaryLinkTypes;
 } fof_params;
 
 /*Set the parameters of the BH module*/
@@ -56,6 +56,9 @@ void set_fof_params(ParameterSet * ps)
         fof_params.FOFHaloLinkingLength = param_get_double(ps, "FOFHaloLinkingLength");
         fof_params.FOFHaloMinLength = param_get_int(ps, "FOFHaloMinLength");
         fof_params.MinFoFMassForNewSeed = param_get_double(ps, "MinFoFMassForNewSeed");
+        fof_params.MinMStarForNewSeed = param_get_double(ps, "MinMStarForNewSeed");
+        fof_params.FOFPrimaryLinkTypes = param_get_int(ps, "FOFPrimaryLinkTypes");
+        fof_params.FOFSecondaryLinkTypes = param_get_int(ps, "FOFSecondaryLinkTypes");
     }
     MPI_Bcast(&fof_params, sizeof(struct FOFParams), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
@@ -96,39 +99,33 @@ static void fof_reduce_groups(
     size_t elsize,
     void (*reduce_group)(void * gdst, void * gsrc), MPI_Comm Comm);
 
-static void fof_finish_group_properties(struct Group * Group, double BoxSize);
-static void
-fof_compile_base(struct BaseGroup * base, MPI_Comm Comm);
-static void
-fof_compile_catalogue(struct Group * group, double BoxSize, int BlackHoleInfo, MPI_Comm Comm);
+static void fof_finish_group_properties(FOFGroups * fof, double BoxSize);
+
+static int fof_compile_base(struct BaseGroup * base, int NgroupsExt, MPI_Comm Comm);
+static void fof_compile_catalogue(FOFGroups * fof, const int NgroupsExt, double BoxSize, MPI_Comm Comm);
 
 static struct Group *
 fof_alloc_group(const struct BaseGroup * base, const int NgroupsExt);
 
-static void fof_assign_grnr(struct BaseGroup * base, MPI_Comm Comm);
+static void fof_assign_grnr(struct BaseGroup * base, const int NgroupsExt, MPI_Comm Comm);
 
 void fof_label_primary(ForceTree * tree, MPI_Comm Comm);
-extern void fof_save_particles(int num, int SaveParticles, MPI_Comm Comm);
-
-/* Ngroups and NgroupsExt are both maximally NumPart,
- * so can be 32-bit*/
-int Ngroups, NgroupsExt;
-int64_t TotNgroups;
-
-struct Group *Group;
+extern void fof_save_particles(FOFGroups * fof, int num, int SaveParticles, MPI_Comm Comm);
 
 typedef struct {
     TreeWalkQueryBase base;
     MyFloat Hsml;
     MyIDType MinID;
-    MyIDType MinIDTask;
+    int MinIDTask;
+    int pad;
 } TreeWalkQueryFOF;
 
 typedef struct {
     TreeWalkResultBase base;
     MyFloat Distance;
     MyIDType MinID;
-    MyIDType MinIDTask;
+    int MinIDTask;
+    int pad;
 } TreeWalkResultFOF;
 
 typedef struct {
@@ -138,7 +135,7 @@ typedef struct {
 static struct fof_particle_list
 {
     MyIDType MinID;
-    MyIDType MinIDTask;
+    int MinIDTask;
     int Pindex;
 }
 *HaloLabel;
@@ -151,12 +148,10 @@ static MPI_Datatype MPI_TYPE_GROUP;
  *
  **/
 
-void fof_fof(ForceTree * tree, double BoxSize, int BlackHoleInfo, MPI_Comm Comm)
+FOFGroups
+fof_fof(ForceTree * tree, MPI_Comm Comm)
 {
     int i;
-
-    MPI_Type_contiguous(sizeof(Group[0]), MPI_BYTE, &MPI_TYPE_GROUP);
-    MPI_Type_commit(&MPI_TYPE_GROUP);
 
     message(0, "Begin to compute FoF group catalogues. (allocated: %g MB)\n",
             mymalloc_usedbytes() / (1024.0 * 1024.0));
@@ -189,7 +184,7 @@ void fof_fof(ForceTree * tree, double BoxSize, int BlackHoleInfo, MPI_Comm Comm)
     /* sort HaloLabel according to MinID, because we need that for compiling catalogues */
     qsort_openmp(HaloLabel, PartManager->NumPart, sizeof(struct fof_particle_list), fof_compare_HaloLabel_MinID);
 
-    NgroupsExt = 0;
+    int NgroupsExt = 0;
 
     for(i = 0; i < PartManager->NumPart; i ++) {
         if(i == 0 || HaloLabel[i].MinID != HaloLabel[i - 1].MinID) NgroupsExt ++;
@@ -199,21 +194,25 @@ void fof_fof(ForceTree * tree, double BoxSize, int BlackHoleInfo, MPI_Comm Comm)
     /* We create the smaller 'BaseGroup' data set for this. */
     struct BaseGroup * base = (struct BaseGroup *) mymalloc("BaseGroup", sizeof(struct BaseGroup) * NgroupsExt);
 
-    fof_compile_base(base, Comm);
+    NgroupsExt = fof_compile_base(base, NgroupsExt, Comm);
 
     MPIU_Barrier(Comm);
     message(0, "Compiled local group data and catalogue.\n");
 
     walltime_measure("/FOF/Compile");
 
-    fof_assign_grnr(base, Comm);
+    fof_assign_grnr(base, NgroupsExt, Comm);
 
     /*Initialise the Group object from the BaseGroup*/
-    Group = fof_alloc_group(base, NgroupsExt);
+    FOFGroups fof;
+    MPI_Type_contiguous(sizeof(fof.Group[0]), MPI_BYTE, &MPI_TYPE_GROUP);
+    MPI_Type_commit(&MPI_TYPE_GROUP);
+
+    fof.Group = fof_alloc_group(base, NgroupsExt);
 
     myfree(base);
 
-    fof_compile_catalogue(Group, BoxSize, BlackHoleInfo, Comm);
+    fof_compile_catalogue(&fof, NgroupsExt, tree->BoxSize, Comm);
 
     MPIU_Barrier(Comm);
     message(0, "Finished FoF. Group properties are now allocated.. (presently allocated=%g MB)\n",
@@ -222,12 +221,14 @@ void fof_fof(ForceTree * tree, double BoxSize, int BlackHoleInfo, MPI_Comm Comm)
     walltime_measure("/FOF/Prop");
 
     myfree(HaloLabel);
+
+    return fof;
 }
 
 void
-fof_finish()
+fof_finish(FOFGroups * fof)
 {
-    myfree(Group);
+    myfree(fof->Group);
 
     message(0, "Finished computing FoF groups.  (presently allocated=%g MB)\n",
             mymalloc_usedbytes() / (1024.0 * 1024.0));
@@ -248,102 +249,86 @@ struct FOFPrimaryPriv {
 /* This function walks the particle tree starting at particle i until it reaches
  * a particle which has Head[i] = i, the root node (particles are initialised in
  * this state, so this is equivalent to finding a particle which has yet to be merged).
- * Each particle is locked along the way, and unlocked once it is clear that it is not a root.
- * Once it reaches a root, it returns that particle number with the lock still held.
- * There are two other arguments:
+ * Once it reaches a root, it returns that particle number.
+ * Arguments:
  *
  * stop: When this particle is reached, return -1. We use this to find an already merged tree.
- *
- * locked: This particle is already locked (setting locked = -1 means no other locks are taken).
- *         When we try to lock a particle locked by another thread, the code checks whether
- *         it can safely take a second lock. If it cannot, it returns -2, with the expectation
- *         that the first lock is released before a retry.
  *
  * Returns:
  *      root particle if found
  *      -1 if stop particle reached
- *      -2 if locking might have deadlocked.
  */
 static int
-HEADl(int stop, int i, int locked, int * Head, struct SpinLocks * spin)
+HEADl(int stop, int i, const int * const Head)
 {
-    int r, next;
-    if (i == stop) {
-        return -1;
-    }
-//    printf("locking %d by %d in HEADl stop = %d\n", i, omp_get_thread_num(), stop);
-    /* Try to lock the particle. Wait on the lock if it is less than the already locked particle,
-     * or if such a particle does not exist. We could use atomic to avoid the lock, but this
-     * makes the locking code less clear, and doesn't lead to much of a speedup: the splay
-     * means that the tree is shallow.*/
-    if(locked < 0 || i < locked) {
-        lock_spinlock(i, spin);
-    }
-    else{
-        if(try_lock_spinlock(i, spin)) {
-            /*This means some other thread already has the lock.
-             *To avoid deadlocks we need to back off, unlock both particles and then retry.*/
-            return -2;
-        }
-    }
-//    printf("locked %d by %d in HEADl, next = %d\n", i, omp_get_thread_num(), FOF_PRIMARY_GET_PRIV(tw)->Head[i]);
-    /* atomic read because we may change
-     * this in update_root without the lock: not necessary on x86_64, but avoids tears elsewhere*/
-    #pragma omp atomic read
-    next = Head[i];
+    int next = i;
 
-    if(next == i) {
-        /* return locked */
-        return i;
-    }
-    /* this is not the root, keep going, but unlock first, since even if the root is modified by
-     * another thread, what we get here is on the path, */
-    unlock_spinlock(i, spin);
-//    printf("unlocking %d by %d in HEADl\n", i, omp_get_thread_num());
-    r = HEADl(stop, next, locked, Head, spin);
-    return r;
+    do {
+        i = next;
+        /* Reached stop, return*/
+        if(i == stop)
+            return -1;
+        /* atomic read because we may change
+         * this in update_root: not necessary on x86_64, but avoids tears elsewhere*/
+        #pragma omp atomic read
+        next = Head[i];
+    } while(next != i);
+
+    /* return unmerged particle*/
+    return i;
 }
 
 /* Rewrite a tree so that all values in it point directly to the true root.
- * This means that the trees are O(1) deep and speeds up future accesses. */
+ * This means that the trees are O(1) deep and speeds up future accesses.
+ * See https://arxiv.org/abs/1607.03224 */
 static void
 update_root(int i, const int r, int * Head)
 {
     int t = i;
     do {
         i = t;
-        #pragma omp atomic read
-        t = Head[i];
-        #pragma omp atomic write
-        Head[i]= r;
-    } while(t != i);
+        #pragma omp atomic capture
+        {
+            t = Head[i];
+            Head[i]= r;
+        }
+        /* Stop if we reached the top (new head is the same as the old)
+         * or if the new head is less than or equal to the desired head, indicating
+         * another thread changed us*/
+    } while(t != i && (t > r));
 }
 
+/* Find the current head particle by walking the tree. No updates are done
+ * so this can be performed from a threaded context. */
 static int
-HEAD(int i, TreeWalk * tw)
+HEAD(int i, const int * const Head)
 {
-    /* accelerate with a splay: see https://arxiv.org/abs/1607.03224 */
-    int r;
-    r = i;
-    while(FOF_PRIMARY_GET_PRIV(tw)->Head[r] != r) {
-        r = FOF_PRIMARY_GET_PRIV(tw)->Head[r];
-    }
-    while(FOF_PRIMARY_GET_PRIV(tw)->Head[i] != i) {
-        int t = FOF_PRIMARY_GET_PRIV(tw)->Head[i];
-        FOF_PRIMARY_GET_PRIV(tw)->Head[i]= r;
-        i = t;
+    int r = i;
+    while(Head[r] != r) {
+        r = Head[r];
     }
     return r;
 }
 
 static void fof_primary_copy(int place, TreeWalkQueryFOF * I, TreeWalk * tw) {
-    int head = HEAD(place, tw);
+    /* The copied data is *only* used for the
+     * secondary treewalk, so fill up garbage for the primary treewalk.
+     * The copy is a technical race otherwise. */
+    if(I->base.NodeList[0] == tw->tree->firstnode) {
+        I->MinID = -1;
+        I->MinIDTask = -1;
+        return;
+    }
+    /* Secondary treewalk, no need for locking here*/
+    int head = HEAD(place, FOF_PRIMARY_GET_PRIV(tw)->Head);
     I->MinID = HaloLabel[head].MinID;
     I->MinIDTask = HaloLabel[head].MinIDTask;
 }
 
 static int fof_primary_haswork(int n, TreeWalk * tw) {
-    return (((1 << P[n].Type) & (FOF_PRIMARY_LINK_TYPES))) && FOF_PRIMARY_GET_PRIV(tw)->PrimaryActive[n];
+    if(P[n].IsGarbage || P[n].Swallowed)
+        return 0;
+    return (((1 << P[n].Type) & (fof_params.FOFPrimaryLinkTypes))) && FOF_PRIMARY_GET_PRIV(tw)->PrimaryActive[n];
 }
 
 static void
@@ -385,8 +370,7 @@ void fof_label_primary(ForceTree * tree, MPI_Comm Comm)
 
     /* allocate buffers to arrange communication */
 
-    t0 = second();
-
+    #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
     {
         FOF_PRIMARY_GET_PRIV(tw)->Head[i] = i;
@@ -397,6 +381,7 @@ void fof_label_primary(ForceTree * tree, MPI_Comm Comm)
         HaloLabel[i].MinIDTask = ThisTask;
     }
 
+    /* The lock is used to protect MinID*/
     priv[0].spin = init_spinlocks(PartManager->NumPart);
     do
     {
@@ -405,13 +390,44 @@ void fof_label_primary(ForceTree * tree, MPI_Comm Comm)
         treewalk_run(tw, NULL, PartManager->NumPart);
 
         t1 = second();
-
+        /* This sets the MinID of the head particle to the minimum ID
+         * of the child particles. We set this inside the treewalk,
+         * but the locking allows a race, where the particle with MinID set
+         * is no longer the one which is the true Head of the group.
+         * So we must check it again here.*/
+        #pragma omp parallel for
+        for(i = 0; i < PartManager->NumPart; i++) {
+            int head = HEAD(i, FOF_PRIMARY_GET_PRIV(tw)->Head);
+            /* Don't check against ourself*/
+            if(head == i)
+                continue;
+            MyIDType headminid;
+            #pragma omp atomic read
+            headminid = HaloLabel[head].MinID;
+            /* No atomic needed for i as this is not a head*/
+            if(headminid > HaloLabel[i].MinID) {
+                lock_spinlock(head, priv->spin);
+                if(HaloLabel[head].MinID > HaloLabel[i].MinID) {
+                    #pragma omp atomic write
+                    HaloLabel[head].MinID = HaloLabel[i].MinID;
+                    HaloLabel[head].MinIDTask = HaloLabel[i].MinIDTask;
+                }
+                unlock_spinlock(head, priv->spin);
+            }
+        }
         /* let's check out which particles have changed their MinID,
          * mark them for next round. */
         link_across = 0;
 #pragma omp parallel for reduction(+: link_across)
         for(i = 0; i < PartManager->NumPart; i++) {
-            MyIDType newMinID = HaloLabel[HEAD(i, tw)].MinID;
+            int head = HEAD(i, FOF_PRIMARY_GET_PRIV(tw)->Head);
+            /* This loop sets the MinID of the children to the minID of the head.
+             * The minID of the head is set above and is stable at this point.*/
+            if(i != head) {
+                HaloLabel[i].MinID = HaloLabel[head].MinID;
+                HaloLabel[i].MinIDTask = HaloLabel[head].MinIDTask;
+            }
+            MyIDType newMinID = HaloLabel[head].MinID;
             if(newMinID != FOF_PRIMARY_GET_PRIV(tw)->OldMinID[i]) {
                 FOF_PRIMARY_GET_PRIV(tw)->PrimaryActive[i] = 1;
                 link_across ++;
@@ -427,13 +443,6 @@ void fof_label_primary(ForceTree * tree, MPI_Comm Comm)
 
     free_spinlocks(priv[0].spin);
 
-    /* Update MinID of all linked (primary-linked) particles */
-    for(i = 0; i < PartManager->NumPart; i++)
-    {
-        HaloLabel[i].MinID = HaloLabel[HEAD(i, tw)].MinID;
-        HaloLabel[i].MinIDTask = HaloLabel[HEAD(i, tw)].MinIDTask;
-    }
-
     message(0, "Local groups found.\n");
 
     myfree(FOF_PRIMARY_GET_PRIV(tw)->OldMinID);
@@ -446,33 +455,52 @@ fofp_merge(int target, int other, TreeWalk * tw)
 {
     /* this will lock h1 */
     int * Head = FOF_PRIMARY_GET_PRIV(tw)->Head;
-    struct SpinLocks * spin = FOF_PRIMARY_GET_PRIV(tw)->spin;
     int h1, h2;
-
     do {
-        h1 = HEADl(-1, target, -1, Head, spin);
-        /* stop looking if we find h1 along the path (because it is already owned by us) */
-        h2 = HEADl(h1, other, h1, Head, spin);
-        /* We had a lock already taken on h2 by another thread.
-         * We need to unlock h1 and retry to avoid deadlock loops.*/
-        if(h2 == -2)
-            unlock_spinlock(h1, spin);
-    } while(h2 == -2);
-
-    if(h2 >=0)
-    {
-        /* h2 as a sub-tree of h1 */
-        Head[h2] = h1;
-
-        /* update MinID of h1 */
-        if(HaloLabel[h1].MinID > HaloLabel[h2].MinID)
-        {
-            HaloLabel[h1].MinID = HaloLabel[h2].MinID;
-            HaloLabel[h1].MinIDTask = HaloLabel[h2].MinIDTask;
+        h1 = HEADl(-1, target, Head);
+        /* Done if we find h1 along the path
+         * (because other is already in the same halo) */
+        h2 = HEADl(h1, other, Head);
+        if(h2 < 0)
+            return;
+        /* Ensure that we always merge to the lower entry.
+         * This avoids circular loops in the Head entries:
+         * a -> b -> a */
+        if(h1 > h2) {
+            int tmp = h2;
+            h2 = h1;
+            h1 = tmp;
         }
-        //printf("unlocking %d by %d in merge\n", h2, omp_get_thread_num());
-        unlock_spinlock(h2, spin);
+     /* Atomic compare exchange to make h2 a subtree of h1.
+      * Set Head[h2] = h1 iff Head[h2] is still h2. Otherwise loop.*/
+    } while(!__atomic_compare_exchange(&Head[h2], &h2, &h1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+
+    struct SpinLocks * spin = FOF_PRIMARY_GET_PRIV(tw)->spin;
+
+    /* update MinID of h1: h2 is now just another child of h1
+     * so we don't need to check that h2 changes its head.
+     * It might happen that h1 is added to another halo at this point
+     * and the addition gets the wrong MinID.
+     * For this reason we recompute the MinIDs after the main treewalk.
+     * We also lock h2 for a copy in case it is the h1 in another thread,
+     * and may have inconsistent MinID and MinIDTask.*/
+
+    /* Get a copy of h2 under the lock, which ensures
+     * that MinID and MinIDTask do not change independently. */
+    struct fof_particle_list h2label;
+    lock_spinlock(h2, spin);
+    h2label.MinID = HaloLabel[h2].MinID;
+    h2label.MinIDTask = HaloLabel[h2].MinIDTask;
+    unlock_spinlock(h2, spin);
+
+    /* Now lock h1 so we don't change MinID but not MinIDTask.*/
+    lock_spinlock(h1, spin);
+    if(HaloLabel[h1].MinID > h2label.MinID)
+    {
+        HaloLabel[h1].MinID = h2label.MinID;
+        HaloLabel[h1].MinIDTask = h2label.MinIDTask;
     }
+    unlock_spinlock(h1, spin);
 
     /* h1 must be the root of other and target both:
      * do the splay to speed up future accesses.
@@ -482,8 +510,6 @@ fofp_merge(int target, int other, TreeWalk * tw)
     update_root(target, h1, Head);
     update_root(other, h1, Head);
 
-    //printf("unlocking %d by %d in merge\n", h1, omp_get_thread_num());
-    unlock_spinlock(h1, spin);
 }
 
 static void
@@ -496,7 +522,7 @@ fof_primary_ngbiter(TreeWalkQueryFOF * I,
     if(iter->base.other == -1) {
         iter->base.Hsml = fof_params.FOFHaloComovingLinkingLength;
         iter->base.symmetric = NGB_TREEFIND_ASYMMETRIC;
-        iter->base.mask = FOF_PRIMARY_LINK_TYPES;
+        iter->base.mask = fof_params.FOFPrimaryLinkTypes;
         return;
     }
     int other = iter->base.other;
@@ -507,18 +533,20 @@ fof_primary_ngbiter(TreeWalkQueryFOF * I,
             // printf("locked merge %d %d by %d\n", lv->target, other, omp_get_thread_num());
             fofp_merge(lv->target, other, tw);
         }
-    } else /* mode is 1, target is a ghost */
+    }
+    else /* mode is 1, target is a ghost */
     {
-            struct SpinLocks * spin = FOF_PRIMARY_GET_PRIV(tw)->spin;
+        int head = HEAD(other, FOF_PRIMARY_GET_PRIV(tw)->Head);
+        struct SpinLocks * spin = FOF_PRIMARY_GET_PRIV(tw)->spin;
 //        printf("locking %d by %d in ngbiter\n", other, omp_get_thread_num());
-        lock_spinlock(other, spin);
-        if(HaloLabel[HEAD(other, tw)].MinID > I->MinID)
+        lock_spinlock(head, spin);
+        if(HaloLabel[head].MinID > I->MinID)
         {
-            HaloLabel[HEAD(other, tw)].MinID = I->MinID;
-            HaloLabel[HEAD(other, tw)].MinIDTask = I->MinIDTask;
+            HaloLabel[head].MinID = I->MinID;
+            HaloLabel[head].MinIDTask = I->MinIDTask;
         }
 //        printf("unlocking %d by %d in ngbiter\n", other, omp_get_thread_num());
-        unlock_spinlock(other, spin);
+        unlock_spinlock(head, spin);
     }
 }
 
@@ -543,6 +571,13 @@ static void fof_reduce_group(void * pdst, void * psrc) {
     }
 
     gdst->Sfr += gsrc->Sfr;
+    gdst->GasMetalMass += gsrc->GasMetalMass;
+    gdst->StellarMetalMass += gsrc->StellarMetalMass;
+    gdst->MassHeIonized += gsrc->MassHeIonized;
+    for(j = 0; j < NMETALS; j++) {
+        gdst->GasMetalElemMass[j] += gsrc->GasMetalElemMass[j];
+        gdst->StellarMetalElemMass[j] += gsrc->StellarMetalElemMass[j];
+    }
     gdst->BH_Mdot += gsrc->BH_Mdot;
     gdst->BH_Mass += gsrc->BH_Mass;
     if(gsrc->MaxDens > gdst->MaxDens)
@@ -565,7 +600,7 @@ static void fof_reduce_group(void * pdst, void * psrc) {
 
 }
 
-static void add_particle_to_group(struct Group * gdst, int i, double BoxSize, int ThisTask, int BlackHoleOn) {
+static void add_particle_to_group(struct Group * gdst, int i, double BoxSize, int ThisTask) {
 
     /* My local number of particles contributing to the full catalogue. */
     const int index = i;
@@ -581,28 +616,36 @@ static void add_particle_to_group(struct Group * gdst, int i, double BoxSize, in
     gdst->LenType[P[index].Type]++;
     gdst->MassType[P[index].Type] += P[index].Mass;
 
-
     if(P[index].Type == 0) {
+        gdst->MassHeIonized += P[index].Mass * P[index].HeIIIionized;
         gdst->Sfr += SPHP(index).Sfr;
+        gdst->GasMetalMass += SPHP(index).Metallicity * P[index].Mass;
+        int j;
+        for(j = 0; j < NMETALS; j++)
+            gdst->GasMetalElemMass[j] += SPHP(index).Metals[j] * P[index].Mass;
     }
-    if(BlackHoleOn && P[index].Type == 5)
+    if(P[index].Type == 4) {
+        int j;
+        gdst->StellarMetalMass += STARP(index).Metallicity * P[index].Mass;
+        for(j = 0; j < NMETALS; j++)
+            gdst->StellarMetalElemMass[j] += STARP(index).Metals[j] * P[index].Mass;
+    }
+
+    if(P[index].Type == 5)
     {
         gdst->BH_Mdot += BHP(index).Mdot;
         gdst->BH_Mass += BHP(index).Mass;
     }
     /*This used to depend on black holes being enabled, but I do not see why.
      * I think because it is only useful for seeding*/
-    if(P[index].Type == 0)
-    {
-        /* make bh in non wind gas on bh wind*/
-        if(SPHP(index).DelayTime <= 0)
-            if(SPHP(index).Density > gdst->MaxDens)
-            {
-                gdst->MaxDens = SPHP(index).Density;
-                gdst->seed_index = index;
-                gdst->seed_task = ThisTask;
-            }
-    }
+    /* Don't make bh in wind.*/
+    if(P[index].Type == 0 && !winds_is_particle_decoupled(index))
+        if(SPHP(index).Density > gdst->MaxDens)
+        {
+            gdst->MaxDens = SPHP(index).Density;
+            gdst->seed_index = index;
+            gdst->seed_task = ThisTask;
+        }
 
     int d1, d2;
     double xyz[3];
@@ -632,11 +675,11 @@ static void add_particle_to_group(struct Group * gdst, int i, double BoxSize, in
 }
 
 static void
-fof_finish_group_properties(struct Group * Group, double BoxSize)
+fof_finish_group_properties(struct FOFGroups * fof, double BoxSize)
 {
     int i;
 
-    for(i = 0; i < Ngroups; i++)
+    for(i = 0; i < fof->Ngroups; i++)
     {
         int d1, d2;
         double cm[3];
@@ -644,7 +687,7 @@ fof_finish_group_properties(struct Group * Group, double BoxSize)
         double jcm[3];
         double vcm[3];
 
-        struct Group * gdst = &Group[i];
+        struct Group * gdst = &fof->Group[i];
         for(d1 = 0; d1 < 3; d1++)
         {
             gdst->Vel[d1] /= gdst->Mass;
@@ -683,8 +726,8 @@ fof_finish_group_properties(struct Group * Group, double BoxSize)
 
 }
 
-static void
-fof_compile_base(struct BaseGroup * base, MPI_Comm Comm)
+static int
+fof_compile_base(struct BaseGroup * base, int NgroupsExt, MPI_Comm Comm)
 {
     memset(base, 0, sizeof(base[0]) * NgroupsExt);
 
@@ -736,6 +779,7 @@ fof_compile_base(struct BaseGroup * base, MPI_Comm Comm)
             i--;
         }
     }
+    return NgroupsExt;
 }
 
 /* Allocate memory for and initialise a Group object
@@ -757,7 +801,7 @@ fof_alloc_group(const struct BaseGroup * base, const int NgroupsExt)
 }
 
 static void
-fof_compile_catalogue(struct Group * group, double BoxSize, int BlackHoleInfo, MPI_Comm Comm)
+fof_compile_catalogue(struct FOFGroups * fof, const int NgroupsExt, double BoxSize, MPI_Comm Comm)
 {
     int i, start, ThisTask;
 
@@ -768,60 +812,62 @@ fof_compile_catalogue(struct Group * group, double BoxSize, int BlackHoleInfo, M
     {
         /* find the first particle */
         for(;start < PartManager->NumPart; start++) {
-            if(HaloLabel[start].MinID >= Group[i].base.MinID) break;
+            if(HaloLabel[start].MinID >= fof->Group[i].base.MinID) break;
         }
         /* add particles */
         for(;start < PartManager->NumPart; start++) {
-            if(HaloLabel[start].MinID != Group[i].base.MinID) {
+            if(HaloLabel[start].MinID != fof->Group[i].base.MinID) {
                 break;
             }
-            add_particle_to_group(&Group[i], HaloLabel[start].Pindex, BoxSize, ThisTask, BlackHoleInfo);
+            add_particle_to_group(&fof->Group[i], HaloLabel[start].Pindex, BoxSize, ThisTask);
         }
     }
 
     /* collect global properties */
-    fof_reduce_groups(Group, NgroupsExt, sizeof(Group[0]), fof_reduce_group, Comm);
+    fof_reduce_groups(fof->Group, NgroupsExt, sizeof(fof->Group[0]), fof_reduce_group, Comm);
 
     /* count Groups and number of particles hosted by me */
-    Ngroups = 0;
+    fof->Ngroups = 0;
     int64_t Nids = 0;
     for(i = 0; i < NgroupsExt; i ++) {
-        if(Group[i].base.MinIDTask != ThisTask) continue;
+        if(fof->Group[i].base.MinIDTask != ThisTask) continue;
 
-        Ngroups++;
-        Nids += Group[i].base.Length;
+        fof->Ngroups++;
+        Nids += fof->Group[i].base.Length;
 
-        if(Group[i].base.Length != Group[i].Length) {
+        if(fof->Group[i].base.Length != fof->Group[i].Length) {
             /* These two shall be consistent */
-            endrun(3333, "Group base Length mismatch with Group Length");
+            endrun(3333, "i=%d Group base Length %d != Group Length %d\n", i, fof->Group[i].base.Length, fof->Group[i].Length);
         }
     }
 
-    fof_finish_group_properties(Group, BoxSize);
+    fof_finish_group_properties(fof, BoxSize);
 
     int64_t TotNids;
-    TotNgroups = Ngroups;
-    MPI_Allreduce(MPI_IN_PLACE, &TotNgroups, 1, MPI_INT64, MPI_SUM, Comm);
+    sumup_large_ints(1, &fof->Ngroups, &fof->TotNgroups);
     MPI_Allreduce(&Nids, &TotNids, 1, MPI_INT64, MPI_SUM, Comm);
 
     /* report some statistics */
-    int largestgroup;
-    if(TotNgroups > 0)
+    int largestloc_tot = 0;
+    double largestmass_tot= 0;
+    if(fof->TotNgroups > 0)
     {
-        int largestloc = 0;
+        double largestmass = 0;
+        int largestlength = 0;
 
         for(i = 0; i < NgroupsExt; i++)
-            if(Group[i].Length > largestloc)
-                largestloc = Group[i].Length;
-        MPI_Allreduce(&largestloc, &largestgroup, 1, MPI_INT, MPI_MAX, Comm);
+            if(fof->Group[i].Length > largestlength) {
+                largestlength = fof->Group[i].Length;
+                largestmass = fof->Group[i].Mass;
+            }
+        MPI_Allreduce(&largestlength, &largestloc_tot, 1, MPI_INT, MPI_MAX, Comm);
+        MPI_Allreduce(&largestmass, &largestmass_tot, 1, MPI_DOUBLE, MPI_MAX, Comm);
     }
-    else
-        largestgroup = 0;
 
-    message(0, "Total number of groups with at least %d particles: %ld\n", fof_params.FOFHaloMinLength, TotNgroups);
-    if(TotNgroups > 0)
+    message(0, "Total number of groups with at least %d particles: %ld\n", fof_params.FOFHaloMinLength, fof->TotNgroups);
+    if(fof->TotNgroups > 0)
     {
-        message(0, "Largest group has %d particles.\n", largestgroup);
+        message(0, "Largest group has %d particles, mass %g.\n", largestloc_tot, largestmass_tot);
         message(0, "Total number of particles in groups: %012ld\n", TotNids);
     }
 }
@@ -951,22 +997,22 @@ static void fof_reduce_groups(
             abort();
         }
     }
-    void * ghosts2 = mymalloc("TMP", NgroupsExt * elsize);
+    void * ghosts2 = mymalloc("TMP", nmemb * elsize);
 
     MPI_Alltoallv_smart(images, Recv_count, NULL, dtype,
                         ghosts2, Send_count, NULL, dtype,
                         Comm);
-    for(i = 0; i < NgroupsExt - Nmine; i ++) {
+    for(i = 0; i < nmemb - Nmine; i ++) {
         struct BaseGroup * g1 = (struct BaseGroup*) ((char*) ghosts + i * elsize);
         struct BaseGroup * g2 = (struct BaseGroup*) ((char*) ghosts2 + i* elsize);
         if(g1->MinID != g2->MinID) {
-            abort();
+            endrun(2, "g1 minID %lu, g2 minID %lu\n", g1->MinID, g2->MinID);
         }
         if(g1->MinIDTask != g2->MinIDTask) {
-            abort();
+            endrun(2, "g1 minIDTask %d, g2 minIDTask %d\n", g1->MinIDTask, g2->MinIDTask);
         }
     }
-    memcpy(ghosts, ghosts2, elsize * (NgroupsExt - Nmine));
+    memcpy(ghosts, ghosts2, elsize * (nmemb - Nmine));
     myfree(ghosts2);
 
     myfree(images);
@@ -982,7 +1028,7 @@ static void fof_reduce_groups(
 static void fof_radix_Group_TotalCountTaskDiffMinID(const void * a, void * radix, void * arg);
 static void fof_radix_Group_OriginalTaskMinID(const void * a, void * radix, void * arg);
 
-static void fof_assign_grnr(struct BaseGroup * base, MPI_Comm Comm)
+static void fof_assign_grnr(struct BaseGroup * base, const int NgroupsExt, MPI_Comm Comm)
 {
     int i, j, NTask, ThisTask;
     int64_t ngr;
@@ -1049,11 +1095,11 @@ static void fof_assign_grnr(struct BaseGroup * base, MPI_Comm Comm)
 
 
 void
-fof_save_groups(int num, MPI_Comm Comm)
+fof_save_groups(FOFGroups * fof, int num, MPI_Comm Comm)
 {
     message(0, "start global sorting of group catalogues\n");
 
-    fof_save_particles(num, fof_params.FOFSaveParticles, Comm);
+    fof_save_particles(fof, num, fof_params.FOFSaveParticles, Comm);
 
     message(0, "Group catalogues saved.\n");
 }
@@ -1062,8 +1108,7 @@ fof_save_groups(int num, MPI_Comm Comm)
 struct FOFSecondaryPriv {
     float *distance;
     float *hsml;
-    int count;
-    int npleft;
+    int *npleft;
 };
 
 #define FOF_SECONDARY_GET_PRIV(tw) ((struct FOFSecondaryPriv *) (tw->priv))
@@ -1073,7 +1118,12 @@ static void fof_secondary_copy(int place, TreeWalkQueryFOF * I, TreeWalk * tw) {
     I->Hsml = FOF_SECONDARY_GET_PRIV(tw)->hsml[place];
 }
 static int fof_secondary_haswork(int n, TreeWalk * tw) {
-    return (((1 << P[n].Type) & (FOF_SECONDARY_LINK_TYPES)));
+    if(P[n].IsGarbage || P[n].Swallowed)
+        return 0;
+    /* Exclude particles where we already found a neighbour*/
+    if(FOF_SECONDARY_GET_PRIV(tw)->distance[n] < 0.5 * LARGE)
+        return 0;
+    return ((1 << P[n].Type) & fof_params.FOFSecondaryLinkTypes);
 }
 static void fof_secondary_reduce(int place, TreeWalkResultFOF * O, enum TreeWalkReduceMode mode, TreeWalk * tw) {
     if(O->Distance < FOF_SECONDARY_GET_PRIV(tw)->distance[place])
@@ -1083,25 +1133,45 @@ static void fof_secondary_reduce(int place, TreeWalkResultFOF * O, enum TreeWalk
         HaloLabel[place].MinIDTask = O->MinIDTask;
     }
 }
+
 static void
 fof_secondary_ngbiter(TreeWalkQueryFOF * I,
         TreeWalkResultFOF * O,
         TreeWalkNgbIterFOF * iter,
-        LocalTreeWalk * lv);
+        LocalTreeWalk * lv)
+{
+    if(iter->base.other == -1) {
+        O->Distance = LARGE;
+        iter->base.Hsml = I->Hsml;
+        iter->base.mask = fof_params.FOFPrimaryLinkTypes;
+        iter->base.symmetric = NGB_TREEFIND_ASYMMETRIC;
+        return;
+    }
+    int other = iter->base.other;
+    double r = iter->base.r;
+    if(r < O->Distance)
+    {
+        O->Distance = r;
+        O->MinID = HaloLabel[other].MinID;
+        O->MinIDTask = HaloLabel[other].MinIDTask;
+    }
+    /* No need to search nodes at a greater distance
+     * now that we have a neighbour.*/
+    iter->base.Hsml = iter->base.r;
+}
 
 static void
 fof_secondary_postprocess(int p, TreeWalk * tw)
 {
-#pragma omp atomic
-    FOF_SECONDARY_GET_PRIV(tw)->count ++;
+    /* More work needed: add this particle to the redo queue*/
+    int tid = omp_get_thread_num();
 
     if(FOF_SECONDARY_GET_PRIV(tw)->distance[p] > 0.5 * LARGE)
     {
         if(FOF_SECONDARY_GET_PRIV(tw)->hsml[p] < 4 * fof_params.FOFHaloComovingLinkingLength)  /* we only search out to a maximum distance */
         {
             /* need to redo this particle */
-#pragma omp atomic
-            FOF_SECONDARY_GET_PRIV(tw)->npleft++;
+            FOF_SECONDARY_GET_PRIV(tw)->npleft[tid]++;
             FOF_SECONDARY_GET_PRIV(tw)->hsml[p] *= 2.0;
 /*
             if(iter >= MAXITER - 10)
@@ -1116,13 +1186,14 @@ fof_secondary_postprocess(int p, TreeWalk * tw)
         }
     }
 }
+
 static void fof_label_secondary(ForceTree * tree)
 {
-    int n, iter;
+    int n;
 
     TreeWalk tw[1] = {{0}};
     tw->ev_label = "FOF_FIND_NEAREST";
-    tw->visit = (TreeWalkVisitFunction) treewalk_visit_ngbiter;
+    tw->visit = treewalk_visit_nolist_ngbiter;
     tw->ngbiter = (TreeWalkNgbIterFunction) fof_secondary_ngbiter;
     tw->ngbiter_type_elsize = sizeof(TreeWalkNgbIterFOF);
     tw->haswork = fof_secondary_haswork;
@@ -1143,76 +1214,45 @@ static void fof_label_secondary(ForceTree * tree)
     FOF_SECONDARY_GET_PRIV(tw)->distance = (float *) mymalloc("FOF_SECONDARY->distance", sizeof(float) * PartManager->NumPart);
     FOF_SECONDARY_GET_PRIV(tw)->hsml = (float *) mymalloc("FOF_SECONDARY->hsml", sizeof(float) * PartManager->NumPart);
 
+    #pragma omp parallel for
     for(n = 0; n < PartManager->NumPart; n++)
     {
-        if(fof_secondary_haswork(n, tw))
-        {
-            FOF_SECONDARY_GET_PRIV(tw)->distance[n] = LARGE;
-            if(P[n].Type == 0) {
-                /* use gas sml as a hint (faster convergence than 0.1 fof_params.FOFHaloComovingLinkingLength at high-z */
-                FOF_SECONDARY_GET_PRIV(tw)->hsml[n] = 0.5 * P[n].Hsml;
-            } else {
-                FOF_SECONDARY_GET_PRIV(tw)->hsml[n] = 0.1 * fof_params.FOFHaloComovingLinkingLength;
-            }
+        FOF_SECONDARY_GET_PRIV(tw)->distance[n] = LARGE;
+        FOF_SECONDARY_GET_PRIV(tw)->hsml[n] = 0.4 * fof_params.FOFHaloComovingLinkingLength;
+
+        if((P[n].Type == 0 || P[n].Type == 4 || P[n].Type == 5) && FOF_SECONDARY_GET_PRIV(tw)->hsml[n] < 0.5 * P[n].Hsml) {
+            /* use gas sml as a hint (faster convergence than 0.1 fof_params.FOFHaloComovingLinkingLength at high-z */
+            FOF_SECONDARY_GET_PRIV(tw)->hsml[n] = 0.5 * P[n].Hsml;
         }
     }
 
-    iter = 0;
-    int64_t counttot, ntot;
+    int64_t ntot;
 
     /* we will repeat the whole thing for those particles where we didn't find enough neighbours */
 
     message(0, "fof-nearest iteration started\n");
+    int NumThreads = omp_get_max_threads();
+    FOF_SECONDARY_GET_PRIV(tw)->npleft = ta_malloc("NPLeft", int, NumThreads);
 
     do
     {
-        FOF_SECONDARY_GET_PRIV(tw)->npleft = 0;
-        FOF_SECONDARY_GET_PRIV(tw)->count = 0;
+        memset(FOF_SECONDARY_GET_PRIV(tw)->npleft, 0, sizeof(int) * NumThreads);
 
         treewalk_run(tw, NULL, PartManager->NumPart);
 
-        sumup_large_ints(1, &FOF_SECONDARY_GET_PRIV(tw)->npleft, &ntot);
-        sumup_large_ints(1, &FOF_SECONDARY_GET_PRIV(tw)->count, &counttot);
-
-        message(0, "fof-nearest iteration %d: need to repeat for %010ld /%010ld particles.\n", iter, ntot, counttot);
-
-        if(ntot < 0) abort();
-        if(ntot > 0)
-        {
-            iter++;
-            if(iter > MAXITER)
-            {
-                endrun(1159, "Failed to converge in fof-nearest");
-            }
+        for(n = 1; n < NumThreads; n++) {
+            FOF_SECONDARY_GET_PRIV(tw)->npleft[0] += FOF_SECONDARY_GET_PRIV(tw)->npleft[n];
         }
+        sumup_large_ints(1, &FOF_SECONDARY_GET_PRIV(tw)->npleft[0], &ntot);
+
+        if(ntot < 0 || (ntot > 0 && tw->Niteration > MAXITER))
+            endrun(1159, "Failed to converge in fof-nearest: ntot %ld", ntot);
     }
     while(ntot > 0);
 
+    ta_free(FOF_SECONDARY_GET_PRIV(tw)->npleft);
     myfree(FOF_SECONDARY_GET_PRIV(tw)->hsml);
     myfree(FOF_SECONDARY_GET_PRIV(tw)->distance);
-}
-
-static void
-fof_secondary_ngbiter( TreeWalkQueryFOF * I,
-        TreeWalkResultFOF * O,
-        TreeWalkNgbIterFOF * iter,
-        LocalTreeWalk * lv)
-{
-    if(iter->base.other == -1) {
-        O->Distance = LARGE;
-        iter->base.Hsml = I->Hsml;
-        iter->base.mask = FOF_PRIMARY_LINK_TYPES;
-        iter->base.symmetric = NGB_TREEFIND_ASYMMETRIC;
-        return;
-    }
-    int other = iter->base.other;
-    double r = iter->base.r;
-    if(r < O->Distance && r < I->Hsml)
-    {
-        O->Distance = r;
-        O->MinID = HaloLabel[other].MinID;
-        O->MinIDTask = HaloLabel[other].MinIDTask;
-    }
 }
 
 /*
@@ -1229,40 +1269,42 @@ static int cmp_seed_task(const void * c1, const void * c2) {
 }
 static void fof_seed_make_one(struct Group * g, int ThisTask);
 
-void fof_seed(MPI_Comm Comm)
+void fof_seed(FOFGroups * fof, ForceTree * tree, ActiveParticles * act, MPI_Comm Comm)
 {
     int i, j, n, ntot;
 
     int NTask;
     MPI_Comm_size(Comm, &NTask);
-    int * Send_count = ta_malloc("Send_count", int, NTask);
-    int * Recv_count = ta_malloc("Recv_count", int, NTask);
 
-    for(n = 0; n < NTask; n++)
-        Send_count[n] = 0;
-
-    char * Marked = mymalloc("SeedMark", Ngroups);
+    char * Marked = mymalloc2("SeedMark", fof->Ngroups);
 
     int Nexport = 0;
-    for(i = 0; i < Ngroups; i++)
+    for(i = 0; i < fof->Ngroups; i++)
     {
         Marked[i] =
-            (Group[i].Mass >= fof_params.MinFoFMassForNewSeed)
-        &&  (Group[i].LenType[5] == 0)
-        &&  (Group[i].seed_index >= 0);
+            (fof->Group[i].Mass >= fof_params.MinFoFMassForNewSeed)
+        &&  (fof->Group[i].MassType[4] >= fof_params.MinMStarForNewSeed)
+        &&  (fof->Group[i].LenType[5] == 0)
+        &&  (fof->Group[i].seed_index >= 0);
 
         if(Marked[i]) Nexport ++;
     }
-    struct Group * ExportGroups = mymalloc("Export", sizeof(Group[0]) * Nexport);
+    struct Group * ExportGroups = mymalloc("Export", sizeof(fof->Group[0]) * Nexport);
     j = 0;
-    for(i = 0; i < Ngroups; i ++) {
+    for(i = 0; i < fof->Ngroups; i ++) {
         if(Marked[i]) {
-            ExportGroups[j] = Group[i];
+            ExportGroups[j] = fof->Group[i];
             j++;
         }
     }
+    myfree(Marked);
+
     qsort_openmp(ExportGroups, Nexport, sizeof(ExportGroups[0]), cmp_seed_task);
 
+    int * Send_count = ta_malloc("Send_count", int, NTask);
+    int * Recv_count = ta_malloc("Recv_count", int, NTask);
+
+    memset(Send_count, 0, NTask * sizeof(int));
     for(i = 0; i < Nexport; i++) {
         Send_count[ExportGroups[i].seed_task]++;
     }
@@ -1277,15 +1319,67 @@ void fof_seed(MPI_Comm Comm)
     }
 
     struct Group * ImportGroups = (struct Group *)
-            mymalloc("ImportGroups", Nimport * sizeof(struct Group));
+            mymalloc2("ImportGroups", Nimport * sizeof(struct Group));
 
     MPI_Alltoallv_smart(ExportGroups, Send_count, NULL, MPI_TYPE_GROUP,
                         ImportGroups, Recv_count, NULL, MPI_TYPE_GROUP,
                         Comm);
 
+    myfree(ExportGroups);
+    ta_free(Recv_count);
+    ta_free(Send_count);
+
     MPI_Allreduce(&Nimport, &ntot, 1, MPI_INT, MPI_SUM, Comm);
 
     message(0, "Making %d new black hole particles.\n", ntot);
+
+    /* Do we have enough black hole slots to create this many black holes?
+     * If not, allocate more slots. */
+    if(Nimport + SlotsManager->info[5].size > SlotsManager->info[5].maxsize)
+    {
+        struct NODE * nodes_base_tmp=NULL;
+        int *Father_tmp=NULL;
+        int *ActiveParticle_tmp=NULL;
+        if(force_tree_allocated(tree)) {
+            nodes_base_tmp = mymalloc2("nodesbasetmp", tree->numnodes * sizeof(struct NODE));
+            memmove(nodes_base_tmp, tree->Nodes_base, tree->numnodes * sizeof(struct NODE));
+            myfree(tree->Nodes_base);
+            Father_tmp = mymalloc2("Father_tmp", PartManager->MaxPart * sizeof(int));
+            memmove(Father_tmp, tree->Father, PartManager->MaxPart * sizeof(int));
+            myfree(tree->Father);
+        }
+        /* This is only called on a PM step, so the condition should never be true*/
+        if(act->ActiveParticle) {
+            ActiveParticle_tmp = mymalloc2("ActiveParticle_tmp", act->NumActiveParticle * sizeof(int));
+            memmove(ActiveParticle_tmp, act->ActiveParticle, act->NumActiveParticle * sizeof(int));
+            myfree(act->ActiveParticle);
+        }
+
+        /*Now we can extend the slots! */
+        int64_t atleast[6];
+        int64_t i;
+        for(i = 0; i < 6; i++)
+            atleast[i] = SlotsManager->info[i].maxsize;
+        atleast[5] += ntot*1.1;
+        slots_reserve(1, atleast, SlotsManager);
+
+        /*And now we need our memory back in the right place*/
+        if(ActiveParticle_tmp) {
+            act->ActiveParticle = mymalloc("ActiveParticle", sizeof(int)*(act->NumActiveParticle + PartManager->MaxPart - PartManager->NumPart));
+            memmove(act->ActiveParticle, ActiveParticle_tmp, act->NumActiveParticle * sizeof(int));
+            myfree(ActiveParticle_tmp);
+        }
+        if(force_tree_allocated(tree)) {
+            tree->Father = mymalloc("Father", PartManager->MaxPart * sizeof(int));
+            memmove(tree->Father, Father_tmp, PartManager->MaxPart * sizeof(int));
+            myfree(Father_tmp);
+            tree->Nodes_base = mymalloc("Nodes_base", tree->numnodes * sizeof(struct NODE));
+            memmove(tree->Nodes_base, nodes_base_tmp, tree->numnodes * sizeof(struct NODE));
+            myfree(nodes_base_tmp);
+            /*Don't forget to update the Node pointer as well as Node_base!*/
+            tree->Nodes = tree->Nodes_base - tree->firstnode;
+        }
+    }
 
     int ThisTask;
     MPI_Comm_rank(Comm, &ThisTask);
@@ -1296,11 +1390,6 @@ void fof_seed(MPI_Comm Comm)
     }
 
     myfree(ImportGroups);
-    myfree(ExportGroups);
-    myfree(Marked);
-
-    ta_free(Recv_count);
-    ta_free(Send_count);
 
     walltime_measure("/FOF/Seeding");
 }

@@ -8,28 +8,19 @@
 
 struct slot_info {
     char * ptr; /* aliasing ptr for this slot */
-    char * scratchdata; /* Pointer to struct of pointers that store optional data for this type, which persists through one time step,
-                         but not beyond. Currently only used for SPH data.*/
-    int maxsize; /* max number of supported slots */
-    int size; /* currently used slots*/
+    int64_t maxsize; /* max number of supported slots */
+    int64_t size; /* currently used slots*/
     size_t elsize; /* itemsize */
     int enabled;
 };
-
-extern struct slots_manager_type {
-    struct slot_info info[6];
-    char * Base; /* memory ptr that holds of all slots */
-    double increase; /* Percentage amount to increase
-                      * slot reservation by when requested.*/
-} SlotsManager[1];
 
 /* Slot particle data structures: first the base extension slot, then black holes,
  * then stars, then SPH. SPH still has some compile-time optional elements.
  * Each particle also has the base data, stored in particle_data.*/
 struct particle_data_ext {
-    /* used at GC for reverse link to P */
-     int ReverseLink;
-    unsigned int IsGarbage : 1; /* marked if the slot is garbage. use slots_mark_garbage to mark this with the base particle index*/
+    /* Used at GC for reverse link to P.
+     * Garbage slots have this impossibly large. */
+    int ReverseLink;
     MyIDType ID; /* for data consistency check, same as particle ID */
 };
 
@@ -43,25 +34,42 @@ struct bh_particle_data {
     MyFloat Mdot;
     MyFloat Density;
     MyFloat FormationTime;  /*!< formation time of black hole. */
-
+    /* Merger time of the black hole.
+     * After this, all values are fixed. */
+    MyFloat SwallowTime;
     int JumpToMinPot;
-    double  MinPotPos[3];
+    double MinPotPos[3];
+    MyFloat MinPotVel[3];
+    /* After a merger, this gives the ID of the particle which swallowed the BH. Used to keep track of merger trees.*/
+    MyIDType SwallowID;
 
-    MyIDType SwallowID; /* Allows marking of a merging particle. Used only in blackhole.c.
-                           Set to -1 in init.c and only reinitialised if a merger takes place.*/
+    /*******************************************************/
+    double DragAccel[3];
+    double DFAccel[3];
+    /*******************************************************/
 
     /* Stores the minimum timebins of all black hole neighbours.
      * The black hole timebin is then set to this.*/
-    short int minTimeBin;
+    int minTimeBin;
+    int encounter; /* mark the event when BH encounters another BH */
+    double Mtrack; /*Swallow gas particle when BHP.Mass accretes from SeedBHMass to SeedDynMass for mass conservation */
+    double Mseed; /*Log the seed mass of BH, would be useful in case of the powerlaw seeding*/
 };
+
+#define NMETALS 9
 
 /*Data for each star particle*/
 struct star_particle_data
 {
     struct particle_data_ext base;
-    MyFloat FormationTime;		/*!< formation time of star particle */
-    MyFloat BirthDensity;		/*!< Density of gas particle at star formation. */
-    MyFloat Metallicity;		/*!< metallicity of star particle */
+    MyFloat FormationTime;      /*!< formation time of star particle */
+    MyFloat LastEnrichmentMyr;  /* Last time the star particle had an enrichment event, in Myr since FormationTime.*/
+    MyFloat TotalMassReturned; /* The total mass returned from this star since formation.
+                                  The initial mass of the SSP in this star is STARP.TotalMassReturned + P.Mass.
+                                  It is stored like this to retain compatibility with older snapshots. */
+    MyFloat BirthDensity;       /*!< Density of gas particle at star formation. */
+    MyFloat Metallicity;        /*!< Total metallicity of star particle */
+    float Metals[NMETALS];      /* Metal mass of each species in star particle*/
 };
 
 /* the following structure holds data that is stored for each SPH particle in addition to the collisionless
@@ -75,7 +83,6 @@ struct sph_particle_data
      * If DensityIndependentSph is off then Density is used instead.*/
     MyFloat EgyWtDensity;           /*!< 'effective' rho to use in hydro equations */
 
-    MyFloat Metallicity;		/*!< metallicity of gas particle */
     MyFloat Entropy;		/*!< Entropy (actually entropic function) at kick time of particle.
                                  * Defined as: P_i = A(s) rho_i^gamma. See Springel & Hernquist 2002.*/
     MyFloat MaxSignalVel;           /*!< maximum signal velocity */
@@ -94,25 +101,18 @@ struct sph_particle_data
                    indirectly ionization state and mean molecular weight. */
     MyFloat DelayTime;		/*!< SH03: remaining maximum decoupling time of wind particle */
                             /*!< VS08: remaining waiting for wind particle to be eligible to form winds again */
-    MyFloat Sfr; /* Star formation rate. Stored here because, if the H2 dependent star formation is used,
+    MyFloat Sfr; /* Star formation rate in Msun/year. Stored here because, if the H2 dependent star formation is used,
                     it depends on the scratch variable GradRho and thus cannot be recomputed after a fof-exchange. */
+    MyFloat Metallicity;        /*!< metallicity of gas particle */
+    float Metals[NMETALS];
 };
 
-struct sph_scratch_data
-{
-    /* Gradient of the SPH density. 3x vector*/
-    MyFloat * GradRho;
-    /*!< Predicted entropy at current particle drift time for SPH computation*/
-    MyFloat * EntVarPred;
-    /* VelPred can always be derived from the current time and acceleration.
-     * However, doing so makes the SPH and hydro code much (a factor of two)
-     * slower. It requires computing get_gravkick_factor twice with different arguments,
-     * which defeats the lookup cache in timefac.c. Because VelPred is used multiple times,
-     * it is much quicker to compute it once and re-use this*/
-    MyFloat * VelPred;            /*!< Predicted velocity at current particle drift time for SPH. 3x vector.*/
-    /*Used to store the BH feedback energy if black holes are on*/
-    MyFloat * Injected_BH_Energy;
-};
+extern struct slots_manager_type {
+    struct slot_info info[6];
+    char * Base; /* memory ptr that holds of all slots */
+    double increase; /* Percentage amount to increase
+                      * slot reservation by when requested.*/
+} SlotsManager[1];
 
 /* shortcuts for accessing different slots directly by the index */
 #define SphP ((struct sph_particle_data*) SlotsManager->info[0].ptr)
@@ -124,32 +124,25 @@ struct sph_scratch_data
 #define BHP(i) BhP[P[i].PI]
 #define STARP(i) StarP[P[i].PI]
 
-/*Shortcut for the extra data*/
-#define SphP_scratch ((struct sph_scratch_data*) SlotsManager->info[0].scratchdata)
-
 extern MPI_Datatype MPI_TYPE_PARTICLE;
 extern MPI_Datatype MPI_TYPE_SLOT[6];
 
 /* shortcuts to access base slot attributes */
-#define BASESLOT_PI(PI, ptype) ((struct particle_data_ext *)(SlotsManager->info[ptype].ptr + SlotsManager->info[ptype].elsize * (PI)))
-#define BASESLOT(i) BASESLOT_PI(P[i].PI, P[i].Type)
+#define BASESLOT_PI(PI, ptype, sman) ((struct particle_data_ext *)(sman->info[ptype].ptr + sman->info[ptype].elsize * (PI)))
 
-void slots_init(double increase);
+void slots_init(double increase, struct slots_manager_type * sman);
 /*Enable a slot on type ptype. All slots are disabled after slots_init().*/
-void slots_set_enabled(int ptype, size_t elsize);
-void slots_free(struct slots_manager_type * SlotsManager);
-void slots_mark_garbage(int i);
-void slots_setup_topology(struct slots_manager_type * SlotsManager);
-void slots_setup_id(const struct slots_manager_type * SlotsManager);
-int slots_split_particle(int parent, double childmass);
-int slots_convert(int parent, int ptype, int placement);
-int slots_gc(int * compact_slots);
-void slots_gc_sorted(void);
-void slots_reserve(int where, int atleast[6]);
-void slots_check_id_consistency(struct slots_manager_type * SlotsManager);
-
-void slots_allocate_sph_scratch_data(int sph_grad_rho, int nsph);
-void slots_free_sph_scratch_data(struct sph_scratch_data * Scratch);
+void slots_set_enabled(int ptype, size_t elsize, struct slots_manager_type * sman);
+void slots_free(struct slots_manager_type * sman);
+void slots_mark_garbage(int i, struct part_manager_type * pman, struct slots_manager_type * sman);
+void slots_setup_topology(struct part_manager_type * pman, int64_t * NLocal, struct slots_manager_type * sman);
+void slots_setup_id(const struct part_manager_type * pman, struct slots_manager_type * sman);
+int slots_split_particle(int parent, double childmass, struct part_manager_type * pman);
+int slots_convert(int parent, int ptype, int placement, struct part_manager_type * pman, struct slots_manager_type * sman);
+int slots_gc(int * compact_slots, struct part_manager_type * pman, struct slots_manager_type * sman);
+void slots_gc_sorted(struct part_manager_type * pman, struct slots_manager_type * sman);
+size_t slots_reserve(int where, int64_t atleast[6], struct slots_manager_type * sman);
+void slots_check_id_consistency(struct part_manager_type * pman, struct slots_manager_type * sman);
 
 typedef struct {
     EIBase base;

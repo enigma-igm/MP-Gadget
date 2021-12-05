@@ -3,28 +3,24 @@ include $(CONFIG)
 
 .PHONY: depends
 .INTERMEDIATE: pfft
-LIBRARIES=lib/libbigfile-mpi.a lib/libmpsort-mpi.a
+MPICC ?= mpicc
+OPTIMIZE ?= -O2 -g -fopenmp -Wall
+LIBRARIES=lib/libbigfile-mpi.a
 FFTLIBRARIES=lib/libpfft_omp.a lib/libfftw3_mpi.a lib/libfftw3_omp.a
 depends: $(LIBRARIES) $(FFTLIBRARIES)
 $(FFTLIBRARIES): pfft
-
-lib/libmpsort-mpi.a: mpsort/mpsort-mpi.c
-	mkdir -p lib; \
-	mkdir -p include; \
-	cd mpsort; \
-	make install PREFIX=$(PWD) CC="$(MPICC)" MPICC="$(MPICC)" CFLAGS="$(OPTIMIZE)"
 
 lib/libbigfile-mpi.a: bigfile/src/bigfile-mpi.c
 	mkdir -p lib; \
 	mkdir -p include; \
 	cd bigfile/src; \
-	make install PREFIX=$(PWD) CC="$(MPICC)" MPICC="$(MPICC)" CFLAGS="$(OPTIMIZE)"
+	make install PREFIX=$(PWD) CC="$(MPICC)" MPICC="$(MPICC)" CFLAGS="$(OPTIMIZE)" AR="$(AR)"
 
 pfft:
 	mkdir -p lib; \
 	mkdir -p include; \
 	#Using -ipo causes icc to crash.
-	MPICC="$(MPICC)" CC="$(MPICC)" CFLAGS="$(filter-out -ipo,$(OPTIMIZE)) -I $(PWD)/include -L$(PWD)/lib" \
+	MPICC="$(MPICC)" CC="$(MPICC)" CFLAGS="$(filter-out -ipo,$(OPTIMIZE)) -I $(PWD)/include -L$(PWD)/lib" AR="$(AR)" RANLIB=$(RANLIB) \
         sh $(PWD)/install_pfft.sh $(PWD)/
 
 clean: clean-fast clean-fft
@@ -32,7 +28,6 @@ clean: clean-fast clean-fft
 clean-fast:
 	rm -rf $(LIBRARIES)
 	cd bigfile/src; make clean
-	cd mpsort; make clean
 
 clean-fft:
 	rm -rf $(FFTLIBRARIES)

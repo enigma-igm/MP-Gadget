@@ -5,8 +5,6 @@ OutputDir = output
 TreeCoolFile = ../TREECOOL_fg_june11
 OutputList = "0.02,0.05,0.1,0.2,0.25,0.33,0.5"
 
-Nmesh = 384
-
 # CPU time -limit
 
 TimeLimitCPU = 430000 #= 80 hours
@@ -26,6 +24,7 @@ HubbleParam = 0.6724      # Hubble paramater
 CoolingOn = 0
 StarformationOn = 0
 RadiationOn = 1
+MetalReturnOn = 0
 DensityIndependentSphOn = 0
 HydroOn = 0
 WindOn = 0

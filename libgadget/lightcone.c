@@ -12,6 +12,7 @@
 #include "utils.h"
 
 #include "allvars.h"
+#include "timefac.h"
 #include "partmanager.h"
 #include "cosmology.h"
 
@@ -21,14 +22,14 @@ static double dloga;
 static double tab_Dc[NENTRY];
 /*
  * light cone on the fly:
- * 
+ *
  * assuming the origin is at (0, 0, 0)
  *
  * */
 
-/* 
+/*
  * replicas to consider, function of redshift;
- * 
+ *
  * */
 static int Nreplica;
 static int BoxBoost = 20;
@@ -45,6 +46,8 @@ static double SampleFraction; /* current fraction of particle gets written */
 static FILE * fd_lightcone;
 
 static double lightcone_get_horizon(double a);
+static void lightcone_cross(int p, double ddrift);
+static void lightcone_set_time(double a);
 /*
 M, L = self.M, self.L
   logx = numpy.linspace(log10amin, 0, Np)
@@ -55,21 +58,22 @@ M, L = self.M, self.L
 */
 static double kernel(double loga, void * params) {
     double a = exp(loga);
-    return 1 / hubble_function(a) * All.CP.Hubble / a;
-} 
+      Cosmology * CP = (Cosmology *) params;
+    return 1 / hubble_function(CP, a) * CP->Hubble / a;
+}
 
-static void lightcone_init_entry(int i) {
+static void lightcone_init_entry(Cosmology * CP, int i) {
     tab_loga[i] = - dloga * (NENTRY - i - 1);
 
-    gsl_integration_workspace * w = gsl_integration_workspace_alloc (1000); 
+    gsl_integration_workspace * w = gsl_integration_workspace_alloc (1000);
 
     double result, error;
 
     gsl_function F;
     F.function = &kernel;
-
+    F.params = CP;
     gsl_integration_qags (&F, tab_loga[i], 0, 0, 1e-7, 1000,
-            w, &result, &error); 
+            w, &result, &error);
 
     /* result is in DH, hubble distance */
     /* convert to cm / h */
@@ -84,15 +88,18 @@ static void lightcone_init_entry(int i) {
 //    printf("a = %g z = %g Dc = %g\n", a, z, result);
 }
 
-void lightcone_init(double timeBegin)
+void lightcone_init(Cosmology * CP, double timeBegin)
 {
     int i;
     dloga = (0.0 - log(timeBegin)) / (NENTRY - 1);
     for(i = 0; i < NENTRY; i ++) {
-        lightcone_init_entry(i);
+        lightcone_init_entry(CP, i);
     };
     char buf[1024];
     int chunk = 100;
+    int ThisTask;
+    MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+
     sprintf(buf, "%s/lightcone/", All.OutputDir);
     mkdir(buf, 02755);
     sprintf(buf, "%s/lightcone/%03d/", All.OutputDir, (int)(ThisTask / chunk));
@@ -163,6 +170,22 @@ static void update_replicas(double a) {
         }
     }
 }
+
+/* Compute a list of particles which crossed
+ * the lightcone boundaries on this timestep and
+ * write them to the lightcone file*/
+void lightcone_compute(double a, Cosmology * CP, inttime_t ti_curr, inttime_t ti_next)
+{
+    int i;
+    lightcone_set_time(a);
+    const double ddrift = get_exact_drift_factor(CP, ti_curr, ti_next);
+    #pragma omp parallel for
+    for(i = 0; i < PartManager->NumPart; i++)
+    {
+        lightcone_cross(i, ddrift);
+    }
+}
+
 void lightcone_set_time(double a) {
     double z = 1 / a - 1;
     if(z > zmin && z < zmax) {
@@ -179,27 +202,24 @@ void lightcone_set_time(double a) {
              */
             /* This is the angular resolution rule */
             SampleFraction = HorizonDistanceRef / HorizonDistance;
-            SampleFraction *= SampleFraction; 
-            SampleFraction *= SampleFraction; 
+            SampleFraction *= SampleFraction;
+            SampleFraction *= SampleFraction;
             /* This is the luminosity resolution rule */
 #if 0
             SampleFraction = HorizonDistanceRef / HorizonDistance;
             SampleFraction *= (1 + ReferenceRedshift) / (1 + z);
-            SampleFraction *= SampleFraction; 
+            SampleFraction *= SampleFraction;
 
 #endif
         }
-        if(ThisTask == 0) {
-            printf("RefRedeshit=%g, SampleFraction=%g HorizonDistance=%g\n", 
-                    ReferenceRedshift, SampleFraction, HorizonDistance);
-        }
+        message(0,"RefRedeshit=%g, SampleFraction=%g HorizonDistance=%g\n", ReferenceRedshift, SampleFraction, HorizonDistance);
     } else {
         SampleFraction = 0;
     }
 }
 
 /* check crossing of the horizon, write the particle */
-void lightcone_cross(int p, double oldpos[3]) {
+static void lightcone_cross(int p, double ddrift) {
     if(SampleFraction <= 0.0) return;
     int i;
     int k;
@@ -215,8 +235,8 @@ void lightcone_cross(int p, double oldpos[3]) {
         double p3[4];
         double dnew = 0, dold = 0;
         for(k = 0; k < 3; k ++) {
-            pnew[k] = P[p].Pos[k] + Reps[i][k];
-            pold[k] = oldpos[k] + Reps[i][k];
+            pold[k] = P[p].Pos[k] + Reps[i][k] - PartManager->CurrentParticleOffset[k];
+            pnew[k] = P[p].Pos[k] + P[i].Vel[k] * ddrift - PartManager->CurrentParticleOffset[k];
             dnew += pnew[k] * pnew[k];
             dold += pold[k] * pold[k];
         }
@@ -237,7 +257,7 @@ void lightcone_cross(int p, double oldpos[3]) {
                  * this partilce is moving along the horizon! */
                 u1 = u2 = 0.5;
             }
-        
+
             /* write particle position */
             for(k = 0; k < 3; k ++) {
                 p3[k] = pold[k] * u2 + pnew[k] * u1;

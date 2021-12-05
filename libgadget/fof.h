@@ -3,28 +3,12 @@
 
 #include "forcetree.h"
 #include "utils/paramset.h"
+#include "timestep.h"
+#include "slotsmanager.h"
 
 void set_fof_params(ParameterSet * ps);
 
 void fof_init(double DMMeanSeparation);
-
-/*Computes the Group structure, saved as a global array below*/
-void fof_fof(ForceTree * tree, double BoxSize, int BlackHoleInfo, MPI_Comm Comm);
-
-/*Frees the Group structure*/
-void
-fof_finish(void);
-
-/*Uses the Group structure to seed blackholes*/
-void
-fof_seed(MPI_Comm Comm);
-
-/*Saves the Group structure to disc.*/
-void
-fof_save_groups(int num, MPI_Comm Comm);
-
-extern int Ngroups;
-extern int64_t TotNgroups;
 
 struct BaseGroup {
     int OriginalTask;
@@ -33,16 +17,20 @@ struct BaseGroup {
     int GrNr;
     MyIDType MinID;
     int MinIDTask;
+    /* Note: this is in the translated frame,
+     * subtract CurrentParticleOffset to get the physical frame.*/
     float FirstPos[3];
 };
 
-extern struct Group
+struct Group
 {
     struct BaseGroup base;
     int Length;
     int LenType[6];
     double MassType[6];
     double Mass;
+    /* Note: this is in the translated frame,
+     * subtract CurrentParticleOffset to get the physical frame.*/
     double CM[3];
     double Vel[3];
 
@@ -50,6 +38,16 @@ extern struct Group
     double Jmom[3]; /* sum M R_i x V_i  */
 
     double Sfr;
+    /* Metal masses. These are the total mass in metals in the gas and stars respectively,
+     * and then the species specific breakdowns for stars and gas.
+     * You can obtain metallicities by dividing them by the type-specific masses.*/
+    double GasMetalMass;
+    double StellarMetalMass;
+    float StellarMetalElemMass[NMETALS];
+    float GasMetalElemMass[NMETALS];
+
+    /* Number of gas particles in the halo which have had helium ionization happen to them*/
+    float MassHeIonized;
     /*These are used for storing black hole properties*/
     double BH_Mass;
     double BH_Mdot;
@@ -57,6 +55,30 @@ extern struct Group
 
     int seed_index;
     int seed_task;
-} * Group;
+};
+
+/* Structure to hold all allocated FOF groups*/
+typedef struct FOFGroups
+{
+    struct Group * Group;
+    /* Ngroups is maximally NumPart,
+     * so can be 32-bit*/
+    int Ngroups;
+    int64_t TotNgroups;
+} FOFGroups;
+
+/*Computes the Group structure, saved as a global array below*/
+FOFGroups fof_fof(ForceTree * tree, MPI_Comm Comm);
+
+/*Frees the Group structure*/
+void fof_finish(FOFGroups * fof);
+
+/*Uses the Group structure to seed blackholes.
+ * The tree and active particle structs are used only because we may need to reallocate them. */
+void fof_seed(FOFGroups * fof, ForceTree * tree, ActiveParticles * act, MPI_Comm Comm);
+
+/*Saves the Group structure to disc.*/
+void fof_save_groups(FOFGroups * fof, int num, MPI_Comm Comm);
+
 
 #endif

@@ -17,7 +17,7 @@
 static int parse_enum(ParameterEnum * table, const char * strchoices) {
     int value = 0;
     ParameterEnum * p = table;
-    char * delim = ",;&| \t";
+    char * delim = "\",;&| \t";
     char * token;
 
     char * strchoices2 = fastpm_strdup(strchoices);
@@ -64,7 +64,8 @@ static char * format_enum(ParameterEnum * table, int value) {
                 bleft += extra;
                 break;
             }
-            strncpy(c, p->name, bleft);
+            /* The above ensures a large enough buffer*/
+            strcpy(c, p->name);
             c += strlen(p->name);
         }
     }
@@ -183,10 +184,13 @@ int param_validate(ParameterSet * ps, char **error)
         ParameterSchema * p = &ps->p[i];
         if(p->required == REQUIRED && ps->value[p->index].nil) {
             char * error1 = fastpm_strdup_printf("Parameter `%s` is required, but not set.", p->name);
-            char * tmp = fastpm_strappend(*error, "\n", error1);
+            int len = strlen(error1)+1;
+            char * tmp2 = ta_malloc2("tmp2", char, len);
+            strncpy(tmp2, error1, len);
             myfree(error1);
-            if(*error) myfree(*error);
+            char * tmp = fastpm_strappend(*error, "\n", tmp2);
             *error = tmp;
+            myfree(tmp2);
             flag = 1;
         }
     }
@@ -226,9 +230,13 @@ int param_parse (ParameterSet * ps, char * content, char **error)
             char * error1;
             int flag1 = param_emit(ps, p1, p - p1, lineno, &error1);
             if(flag1 != 0) {
-                char * tmp = fastpm_strappend(*error, "\n", error1);
+                int len = strlen(error1)+1;
+                char * tmp2 = ta_malloc2("tmp2", char, len);
+                strncpy(tmp2, error1, len);
+                tmp2[len-1] = '\0';
                 myfree(error1);
-                if(*error) myfree(*error);
+                char * tmp = fastpm_strappend(*error, "\n", tmp2);
+                myfree(tmp2);
                 *error = tmp;
             }
             flag |= flag1;
@@ -251,11 +259,12 @@ int param_parse_file (ParameterSet * ps, const char * filename, char ** error)
         return -1;
     }
     int val = param_parse(ps, content, error);
+
     myfree(content);
     return val;
 }
 
-static ParameterSchema * 
+static ParameterSchema *
 param_declare(ParameterSet * ps, char * name, int type, enum ParameterFlag required, char * help)
 {
     int free = ps->size;

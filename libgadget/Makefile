@@ -16,12 +16,14 @@ INCL = densitykernel.h \
 	allvars.h \
 	partmanager.h \
 	cooling.h   \
+	cooling_rates.h cooling_qso_lightup.h \
 	domain.h   \
 	exchange.h \
 	slotsmanager.h     \
 	checkpoint.h \
 	physconst.h   \
 	sfr_eff.h \
+	metal_return.h \
 	winds.h \
 	timefac.h \
 	blackhole.h \
@@ -40,6 +42,7 @@ utils/interp.h \
 utils/paramset.h \
 utils/endrun.h \
 utils/memory.h \
+utils/mpsort.h \
 utils/mymalloc.h \
 utils/system.h \
 utils/event.h \
@@ -48,6 +51,7 @@ utils/spinlocks.h \
 utils/string.h
 
 UTILS_TESTED = memory openmpsort interp
+UTILS_MPI_TESTED = mpsort
 
 TESTED = hci \
 	slotsmanager \
@@ -59,15 +63,17 @@ TESTED = hci \
 	timebinmgr \
 	neutrinos_lra \
 	omega_nu_single \
+	metal_return \
 	cooling_rates \
 	density \
+	gravity \
 	exchange
 
 MPI_TESTED = exchange
 
-TESTBIN :=$(UTILS_TESTED:%=.objs/utils/test_%) $(TESTED:%=.objs/test_%) $(MPI_TESTED:%=.objs/test_%)
+TESTBIN :=$(UTILS_TESTED:%=.objs/utils/test_%) $(UTILS_MPI_TESTED:%=.objs/utils/test_%) $(TESTED:%=.objs/test_%) $(MPI_TESTED:%=.objs/test_%)
 SUITE?= $(TESTED:%=test_%) $(UTILS_TESTED:%=utils/test_%)
-MPISUITE = $(MPI_TESTED:%=test_%)
+MPISUITE = $(MPI_TESTED:%=test_%) $(UTILS_MPI_TESTED:%=utils/test_%)
 include ../Makefile.rules
 
 FILES = $(shell git ls-files)
@@ -84,12 +90,12 @@ include ../Makefile.version
 GADGET_OBJS =  \
 	 gdbtools.o hci.o\
 	 fof.o fofpetaio.o petaio.o \
-	 domain.o exchange.o slotsmanager.o allvars.o partmanager.o \
+	 domain.o exchange.o slotsmanager.o partmanager.o \
 	 blackhole.o timebinmgr.o \
 	 run.o drift.o stats.o \
 	 timestep.o init.o checkpoint.o \
-	 sfr_eff.o cooling.o cooling_rates.o cooling_uvfluc.o winds.o \
-	 density.o \
+	 sfr_eff.o cooling.o cooling_rates.o cooling_uvfluc.o cooling_qso_lightup.o \
+	 winds.o density.o metal_return.o \
 	 treewalk.o cosmology.o \
 	 gravshort-tree.o gravshort-pair.o hydra.o  timefac.o \
 	 gravpm.o powerspectrum.o \
@@ -106,6 +112,7 @@ utils/endrun.o \
 utils/peano.o \
 utils/interp.o \
 utils/memory.o \
+utils/mpsort.o \
 utils/mymalloc.o \
 utils/system.o \
 utils/paramset.o \
@@ -132,10 +139,19 @@ all: libgadget.a libgadget-utils.a
 .objs/test_cooling_rates: tests/test_cooling_rates.c .objs/cooling_rates.o .objs/cooling_uvfluc.o ../tests/stub.c ../tests/cmocka.c libgadget-utils.a
 	$(MPICC) $(TCFLAGS) -I../tests/ $^ $(LIBS) -o $@
 
+.objs/test_exchange: tests/test_exchange.c .objs/exchange.o ../tests/stub.c ../tests/cmocka.c libgadget.a libgadget-utils.a
+	$(MPICC) $(TCFLAGS) -I../tests/ $^ $(LIBS) -o $@
+
 .objs/test_density: tests/test_density.c .objs/density.o libgadget.a ../tests/stub.c ../tests/cmocka.c libgadget-utils.a
 	$(MPICC) $(TCFLAGS) -I../tests/ $^ $(LIBS) -o $@
 
+.objs/test_metal_return: tests/test_metal_return.c .objs/metal_return.o libgadget.a ../tests/stub.c ../tests/cmocka.c libgadget-utils.a
+	$(MPICC) $(TCFLAGS) -I../tests/ $^ $(LIBS) -o $@
+
 .objs/test_cooling: tests/test_cooling.c .objs/cooling.o .objs/cooling_rates.o .objs/cooling_uvfluc.o ../tests/stub.c ../tests/cmocka.c libgadget-utils.a
+	$(MPICC) $(TCFLAGS) -I../tests/ $^ $(LIBS) -o $@
+
+.objs/test_gravity: tests/test_gravity.c libgadget.a ../tests/stub.c ../tests/cmocka.c libgadget-utils.a
 	$(MPICC) $(TCFLAGS) -I../tests/ $^ $(LIBS) -o $@
 
 build-tests: $(TESTBIN)
@@ -151,10 +167,10 @@ test : build-tests
 	done; exit $$err
 
 libgadget-utils.a: $(GADGET_UTILS_OBJS)
-	$(AR) rv $@ $(GADGET_UTILS_OBJS)
+	$(AR) r $@ $(GADGET_UTILS_OBJS)
 
 libgadget.a: $(GADGET_OBJS)
-	$(AR) rv $@ $(GADGET_OBJS)
+	$(AR) r $@ $(GADGET_OBJS)
 
 clean:
 	rm -rf .objs libgadget.a libgadget-utils.a config.c

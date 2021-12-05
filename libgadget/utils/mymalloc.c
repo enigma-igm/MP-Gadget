@@ -32,8 +32,8 @@ tamalloc_init(void)
     int NTask;
     MPI_Comm_size(MPI_COMM_WORLD, &NTask);
 
-    /* Reserve 4MB, 128 bytes per task and 128 bytes per thread for TEMP storage.*/
-    size_t n = 4096 * 1024 + 128 * NTask + 128 * Nt * NTask;
+    /* Reserve 4MB, 512 bytes per thread, 128 bytes per task and 128 bytes per thread per task (for export) for TEMP storage.*/
+    size_t n = 4096 * 1024 + 128 * NTask + 128 * Nt * NTask + 512 * Nt;
 
     message(0, "Reserving %td bytes per rank for TEMP memory allocator. \n", n);
 
@@ -58,9 +58,11 @@ mymalloc_init(double MaxMemSizePerNode)
 
     double nodespercpu = (1.0 * Nhost) / (1.0 * NTask);
     size_t n = 1.0 * MaxMemSizePerNode * nodespercpu * 1024. * 1024.;
-
     message(0, "Nhost = %d\n", Nhost);
     message(0, "Reserving %td bytes per rank for MAIN memory allocator. \n", n);
+    if(n < 1)
+        endrun(2, "Mem too small! MB/node=%g, nodespercpu = %g NTask = %d\n", MaxMemSizePerNode, nodespercpu, NTask);
+
 
     if (MPIU_Any(ALLOC_ENOMEMORY == allocator_init(A_MAIN, "MAIN", n, 1, NULL), MPI_COMM_WORLD)) {
         endrun(0, "Insufficient memory for the MAIN allocator on at least one nodes."

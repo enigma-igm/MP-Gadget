@@ -1,11 +1,9 @@
 #  Relevant files
 
-InitCondFile = output/IC
+InitCondFile = ICS/IC
 OutputDir = output
 TreeCoolFile = ../TREECOOL_fg_june11
-OutputList = 0.1,0.11, 0.15, 0.2,0.299,0.3,0.33333,0.4,0.5
-
-Nmesh = 128
+OutputList = 0.05,0.1,0.11, 0.15, 0.2,0.299,0.3,0.33333,0.4,0.5
 
 # CPU time -limit
 	
@@ -27,6 +25,7 @@ CoolingOn = 1
 StarformationOn = 1
 BlackHoleOn = 1
 HydroOn = 1
+MetalReturnOn = 1
 DensityIndependentSphOn = 1
 StarformationCriterion = density
 RadiationOn = 1
@@ -52,7 +51,7 @@ ArtBulkViscConst = 0.75
 InitGasTemp = 580.0        # always ignored if set to 0 
 MinGasTemp = 5.0
 
-
+MaxMemSizePerNode = 2000
 # Softening lengths
 
 MinGasHsmlFractional = 0.01
@@ -88,7 +87,7 @@ TempClouds = 1000.0   #  in Kelvin
 FactorSN = 0.1
 FactorEVP = 1000.0
 
-WindModel = ofjt10,decouple
+WindModel = ofjt10,isotropic
 WindEfficiency = 2.0
 WindEnergyFraction = 1.0
 WindSigma0 = 353.0 #km/s

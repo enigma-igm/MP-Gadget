@@ -7,37 +7,67 @@
 #include "utils.h"
 
 #include "allvars.h"
+#include "timebinmgr.h"
 #include "domain.h"
 #include "timefac.h"
 #include "cosmology.h"
-#include "cooling.h"
 #include "checkpoint.h"
 #include "slotsmanager.h"
 #include "partmanager.h"
 #include "hydra.h"
+#include "walltime.h"
 #include "timestep.h"
 
 /*! \file timestep.c
  *  \brief routines for 'kicking' particles in
  *  momentum space and assigning new timesteps
  */
-
-/*PM timesteps*/
-TimeSpan PM;
-
-/*Get the dti from the timebin*/
-static inline inttime_t dti_from_timebin(int bin) {
-    /*Casts to work around bug in intel compiler 18.0*/
-    return bin > 0 ? (1u << (unsigned) bin) : 0;
-}
-/*Flat array containing all active particles*/
-int NumActiveParticle;
-int *ActiveParticle;
-
-static inline int get_active_particle(int pa)
+static struct timestep_params
 {
-    if(ActiveParticle)
-        return ActiveParticle[pa];
+    /* adjusts accuracy of time-integration */
+
+    double ErrTolIntAccuracy;   /*!< accuracy tolerance parameter \f$ \eta \f$ for timestep criterion. The
+                                  timesteps is \f$ \Delta t = \sqrt{\frac{2 \eta eps}{a}} \f$ */
+
+    int ForceEqualTimesteps; /*If true, all timesteps have the same timestep, the smallest allowed.*/
+    double MinSizeTimestep,     /*!< minimum allowed timestep. Normally, the simulation terminates if the
+                              timestep determined by the timestep criteria falls below this limit. */
+           MaxSizeTimestep;     /*!< maximum allowed timestep */
+
+    double MaxRMSDisplacementFac;   /*!< this determines a global timestep criterion for cosmological simulations
+                                      in comoving coordinates.  To this end, the code computes the rms velocity
+                                      of all particles, and limits the timestep such that the rms displacement
+                                      is a fraction of the mean particle separation (determined from the
+                                      particle mass and the cosmological parameters). This parameter specifies
+                                      this fraction. */
+
+    double MaxGasVel; /* Limit on Gas velocity */
+    double CourantFac;		/*!< SPH-Courant factor */
+} TimestepParams;
+
+/*Set the parameters of the hydro module*/
+void
+set_timestep_params(ParameterSet * ps)
+{
+    int ThisTask;
+    MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+    if(ThisTask == 0) {
+        TimestepParams.ErrTolIntAccuracy = param_get_double(ps, "ErrTolIntAccuracy");
+        TimestepParams.MaxGasVel = param_get_double(ps, "MaxGasVel");
+        TimestepParams.MaxSizeTimestep = param_get_double(ps, "MaxSizeTimestep");
+
+        TimestepParams.MinSizeTimestep = param_get_double(ps, "MinSizeTimestep");
+        TimestepParams.ForceEqualTimesteps = param_get_int(ps, "ForceEqualTimesteps");
+        TimestepParams.MaxRMSDisplacementFac = param_get_double(ps, "MaxRMSDisplacementFac");
+        TimestepParams.CourantFac = param_get_double(ps, "CourantFac");
+    }
+    MPI_Bcast(&TimestepParams, sizeof(struct timestep_params), MPI_BYTE, 0, MPI_COMM_WORLD);
+}
+
+static inline int get_active_particle(const ActiveParticles * act, int pa)
+{
+    if(act->ActiveParticle)
+        return act->ActiveParticle[pa];
     else
         return pa;
 }
@@ -54,43 +84,70 @@ timestep_eh_slots_fork(EIBase * event, void * userdata)
 
     int parent = ev->parent;
     int child = ev->child;
+    ActiveParticles * act = (ActiveParticles *) userdata;
 
-    if(is_timebin_active(P[parent].TimeBin, All.Ti_Current)) {
-        int childactive = atomic_fetch_and_add(&NumActiveParticle, 1);
-        if(ActiveParticle)
-            ActiveParticle[childactive] = child;
+    if(is_timebin_active(P[parent].TimeBin, P[parent].Ti_drift)) {
+        int64_t childactive = atomic_fetch_and_add_64(&act->NumActiveParticle, 1);
+        if(act->ActiveParticle) {
+            /* This should never happen because we allocate as much space for active particles as we have space
+             * for particles, but just in case*/
+            if(childactive >= act->MaxActiveParticle)
+                endrun(5, "Tried to add %ld active particles, more than %ld allowed\n", childactive, act->MaxActiveParticle);
+            act->ActiveParticle[childactive] = child;
+        }
     }
     return 0;
 }
 
-static inttime_t get_timestep_ti(const int p, const inttime_t dti_max);
+/* Enum for keeping track of which
+ * timestep criterion is limiting each particles'
+ * timestep evolution*/
+enum TimeStepType
+{
+    TI_ACCEL = 0,
+    TI_COURANT = 1,
+    TI_ACCRETE = 2,
+    TI_NEIGH = 3,
+    TI_HSML = 4,
+};
+
+static inttime_t get_timestep_ti(const int p, const inttime_t dti_max, const inttime_t Ti_Current, enum TimeStepType * titype);
 static int get_timestep_bin(inttime_t dti);
-static void do_the_short_range_kick(int i, inttime_t tistart, inttime_t tiend);
-static void do_the_long_range_kick(inttime_t tistart, inttime_t tiend);
+static void do_the_short_range_kick(int i, double dt_entr, double Fgravkick, double Fhydrokick);
 /* Get the current PM (global) timestep.*/
-static inttime_t get_PM_timestep_ti(inttime_t Ti_Current);
+static inttime_t get_PM_timestep_ti(const DriftKickTimes * const times);
 
 /*Initialise the integer timeline*/
-void
+inttime_t
 init_timebins(double TimeInit)
 {
-    All.Ti_Current = ti_from_loga(log(TimeInit));
+    inttime_t Ti_Current = ti_from_loga(log(TimeInit));
     /*Enforce Ti_Current is initially even*/
-    if(All.Ti_Current % 2 == 1)
-        All.Ti_Current++;
-    message(0, "Initial TimeStep at TimeInit %g Ti_Current = %d \n", TimeInit, All.Ti_Current);
-    /* this makes sure the first step is a PM step. */
-    PM.length = 0;
-    PM.Ti_kick = All.Ti_Current;
-    PM.start = All.Ti_Current;
+    if(Ti_Current % 2 == 1)
+        Ti_Current++;
+    message(0, "Initial TimeStep at TimeInit %g Ti_Current = %d \n", TimeInit, Ti_Current);
+    return Ti_Current;
+}
 
-    /* listen to the slots events such that we can set timebin of new particles */
-    event_listen(&EventSlotsFork, timestep_eh_slots_fork, NULL);
+DriftKickTimes init_driftkicktime(inttime_t Ti_Current)
+{
+    DriftKickTimes times = {0};
+    times.Ti_Current = Ti_Current;
+    int i;
+    for(i = 0; i <= TIMEBINS; i++) {
+        times.Ti_kick[i] = times.Ti_Current;
+        times.Ti_lastactivedrift[i] = times.Ti_Current;
+    }
+    /* this makes sure the first step is a PM step. */
+    times.PM_length = 0;
+    times.PM_kick = times.Ti_Current;
+    times.PM_start = times.Ti_Current;
+    return times;
 }
 
 int is_timebin_active(int i, inttime_t current) {
     /*Bin 0 is always active and at time 0 all bins are active*/
-    if(i == 0 || current == 0)
+    if(i <= 0 || current <= 0)
         return 1;
     if(current % dti_from_timebin(i) == 0)
         return 1;
@@ -99,36 +156,30 @@ int is_timebin_active(int i, inttime_t current) {
 
 /*Report whether the current timestep is the end of the PM timestep*/
 int
-is_PM_timestep(inttime_t ti)
+is_PM_timestep(const DriftKickTimes * const times)
 {
-    if(ti > PM.start + PM.length)
-        endrun(12, "Passed end of PM step! ti=%d, PM = %d + %d\n",ti, PM.start, PM.length);
-    return ti == PM.start + PM.length;
-
+    if(times->Ti_Current > times->PM_start + times->PM_length)
+        endrun(12, "Passed end of PM step! ti=%d, PM = %d + %d\n",times->Ti_Current, times->PM_start, times->PM_length);
+    return times->Ti_Current == times->PM_start + times->PM_length;
 }
 
 void
-set_global_time(double newtime) {
-    All.TimeStep = newtime - All.Time;
+set_global_time(const inttime_t Ti_Current) {
+    double oldtime = All.Time;
+    double newtime = exp(loga_from_ti(Ti_Current));
+    All.TimeStep = newtime - oldtime;
     All.Time = newtime;
     All.cf.a = All.Time;
     All.cf.a2inv = 1 / (All.Time * All.Time);
     All.cf.a3inv = 1 / (All.Time * All.Time * All.Time);
-    All.cf.fac_egy = pow(All.Time, 3 * GAMMA_MINUS1);
-    All.cf.hubble = hubble_function(All.Time);
-    All.cf.hubble_a2 = All.Time * All.Time * hubble_function(All.Time);
-
-#ifdef LIGHTCONE
-    lightcone_set_time(All.cf.a);
-#endif
-    set_global_uvbg(1./All.Time - 1);
+    All.cf.hubble = hubble_function(&All.CP, All.Time);
 }
 
 /* This function assigns new short-range timesteps to particles.
  * It will also shrink the PM timestep to the longest short-range timestep.
- * Returns the minimum timestep found.*/
-int
-find_timesteps(inttime_t Ti_Current)
+ * Stores the maximum and minimum timesteps in the DriftKickTimes structure.*/
+void
+find_timesteps(const ActiveParticles * act, DriftKickTimes * times)
 {
     int pa;
     inttime_t dti_min = TIMEBASE;
@@ -136,51 +187,60 @@ find_timesteps(inttime_t Ti_Current)
     walltime_measure("/Misc");
 
     /*Update the PM timestep size */
-    const int isPM = is_PM_timestep(Ti_Current);
-    inttime_t dti_max = PM.length;
+    const int isPM = is_PM_timestep(times);
+    inttime_t dti_max = times->PM_length;
 
     if(isPM) {
-        dti_max = get_PM_timestep_ti(Ti_Current);
-        PM.length = dti_max;
-        PM.start = PM.Ti_kick;
+        dti_max = get_PM_timestep_ti(times);
+        times->PM_length = dti_max;
+        times->PM_start = times->PM_kick;
     }
 
     /* Now assign new timesteps and kick */
-    if(All.ForceEqualTimesteps) {
+    if(TimestepParams.ForceEqualTimesteps) {
         int i;
         #pragma omp parallel for reduction(min:dti_min)
         for(i = 0; i < PartManager->NumPart; i++)
         {
+            enum TimeStepType titype;
             /* Because we don't GC on short timesteps, there can be garbage here.
              * Avoid making it active. */
-            if(P[i].IsGarbage)
+            if(P[i].IsGarbage || P[i].Swallowed)
                 continue;
-            inttime_t dti = get_timestep_ti(i, dti_max);
+            inttime_t dti = get_timestep_ti(i, dti_max, times->Ti_Current, &titype);
             if(dti < dti_min)
                 dti_min = dti;
         }
-        MPI_Allreduce(MPI_IN_PLACE, &dti_min, sizeof(inttime_t), MPI_BYTE, MPI_MIN, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, &dti_min, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     }
 
+    int64_t ntiaccel=0, nticourant=0, ntiaccrete=0, ntineighbour=0, ntihsml=0;
     int badstepsizecount = 0;
     int mTimeBin = TIMEBINS, maxTimeBin = 0;
-    #pragma omp parallel for reduction(min: mTimeBin) reduction(+: badstepsizecount) reduction(max:maxTimeBin)
-    for(pa = 0; pa < NumActiveParticle; pa++)
+    #pragma omp parallel for reduction(min: mTimeBin) reduction(+: badstepsizecount, ntiaccel, nticourant, ntiaccrete, ntineighbour, ntihsml) reduction(max:maxTimeBin)
+    for(pa = 0; pa < act->NumActiveParticle; pa++)
     {
-        const int i = get_active_particle(pa);
+        const int i = get_active_particle(act, pa);
 
-        if(P[i].IsGarbage)
+        if(P[i].IsGarbage || P[i].Swallowed)
             continue;
 
-        if(P[i].Ti_kick != P[i].Ti_drift) {
-            endrun(1, "Inttimes out of sync: Particle %d (bin = %d, ID=%ld) Kick=%x != Drift=%x\n", i, P[i].TimeBin, P[i].ID, P[i].Ti_kick, P[i].Ti_drift);
-        }
-
+        enum TimeStepType titype;
         inttime_t dti;
-        if(All.ForceEqualTimesteps) {
+        if(TimestepParams.ForceEqualTimesteps) {
             dti = dti_min;
         } else {
-            dti = get_timestep_ti(i, dti_max);
+            dti = get_timestep_ti(i, dti_max, times->Ti_Current, &titype);
+            if(titype == TI_ACCEL)
+                ntiaccel++;
+            else if (titype == TI_COURANT)
+                nticourant++;
+            else if (titype == TI_ACCRETE)
+                ntiaccrete++;
+            else if (titype == TI_NEIGH)
+                ntineighbour++;
+            else if (titype == TI_HSML)
+                ntihsml++;
         }
 
         /* make it a power 2 subdivision */
@@ -188,16 +248,17 @@ find_timesteps(inttime_t Ti_Current)
 
         int bin = get_timestep_bin(dti);
         if(bin < 1) {
-            message(1, "Time-step of integer size %d not allowed, id = %lu, debugging info follows. %d\n", dti, P[i].ID);
+            message(1, "Time-step of integer size %d not allowed, id = %lu, debugging info follows.\n", dti, P[i].ID);
             badstepsizecount++;
         }
         int binold = P[i].TimeBin;
 
-        if(bin > binold)		/* timestep wants to increase */
+        /* timestep wants to increase */
+        if(bin > binold)
         {
             /* make sure the new step is currently active,
              * so that particles do not miss a step */
-            while(!is_timebin_active(bin, Ti_Current) && bin > binold && bin > 1)
+            while(!is_timebin_active(bin, times->Ti_Current) && bin > binold && bin > 1)
                 bin--;
         }
         /* This moves particles between time bins:
@@ -216,102 +277,151 @@ find_timesteps(inttime_t Ti_Current)
     MPI_Allreduce(MPI_IN_PLACE, &mTimeBin, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &maxTimeBin, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
 
+    MPI_Allreduce(MPI_IN_PLACE, &ntiaccel, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &nticourant, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &ntihsml, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &ntiaccrete, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &ntineighbour, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
+
     /* Ensure that the PM timestep is not longer than the longest tree timestep;
      * this prevents particles in the longest timestep being active and moving into a higher bin
      * between PM timesteps, thus skipping the PM step entirely.*/
-    if(isPM && PM.length > dti_from_timebin(maxTimeBin))
-        PM.length = dti_from_timebin(maxTimeBin);
-    message(0, "PM timebin: %x dloga = %g  Max = (%g)\n", PM.length, dloga_from_dti(PM.length), All.MaxSizeTimestep);
+    if(isPM && times->PM_length > dti_from_timebin(maxTimeBin))
+        times->PM_length = dti_from_timebin(maxTimeBin);
+    message(0, "PM timebin: %x (dloga: %g Max: %g). Criteria: Accel: %ld Soundspeed: %ld DivVel: %ld Accrete: %ld Neighbour: %ld\n",
+            times->PM_length, dloga_from_dti(times->PM_length, times->Ti_Current), TimestepParams.MaxSizeTimestep,
+            ntiaccel, nticourant, ntihsml, ntiaccrete, ntineighbour);
 
+    /* BH particles have their timesteps set by a timestep limiter.
+     * On the first timestep this is not effective because all the particles have zero timestep.
+     * So on the first timestep only set all BH particles to the smallest allowable timestep*/
+    if(All.TimeStep == 0) {
+        #pragma omp parallel for
+        for(pa = 0; pa < PartManager->NumPart; pa++)
+        {
+            if(P[pa].Type == 5)
+                P[pa].TimeBin = mTimeBin;
+        }
+    }
     if(badstepsizecount) {
         message(0, "bad timestep spotted: terminating and saving snapshot.\n");
-        dump_snapshot();
+        dump_snapshot("TIMESTEP-DUMP", All.OutputDir);
         endrun(0, "Ending due to bad timestep");
     }
     walltime_measure("/Timeline");
-    return mTimeBin;
+    times->mintimebin = mTimeBin;
+    times->maxtimebin = maxTimeBin;
+    return;
+}
+
+/* Update the last active drift times for all bins*/
+void
+update_lastactive_drift(DriftKickTimes * times)
+{
+    int bin;
+    #pragma omp parallel for
+    for(bin = 0; bin <= TIMEBINS; bin++)
+    {
+        /* Update active timestep even if no particles in it*/
+        if(is_timebin_active(bin, times->Ti_Current))
+            times->Ti_lastactivedrift[bin] = times->Ti_Current;
+    }
 }
 
 /* Apply half a kick, for the second half of the timestep.*/
 void
-apply_half_kick(void)
+apply_half_kick(const ActiveParticles * act, Cosmology * CP, DriftKickTimes * times)
 {
-    int pa;
+    int pa, bin;
     walltime_measure("/Misc");
+    double gravkick[TIMEBINS+1] = {0}, hydrokick[TIMEBINS+1] = {0};
+    /* Do nothing for the first timestep when the kicks are always zero*/
+    if(times->mintimebin == 0 && times->maxtimebin == 0)
+        return;
+    #pragma omp parallel for
+    for(bin = times->mintimebin; bin <= TIMEBINS; bin++)
+    {
+        /* Kick the active timebins*/
+        if(is_timebin_active(bin, times->Ti_Current)) {
+            /* do the kick for half a step*/
+            inttime_t dti = dti_from_timebin(bin);
+            inttime_t newkick = times->Ti_kick[bin] + dti/2;
+            /* Compute kick factors for occupied bins*/
+            gravkick[bin] = get_exact_gravkick_factor(CP, times->Ti_kick[bin], newkick);
+            hydrokick[bin] = get_exact_hydrokick_factor(CP, times->Ti_kick[bin], newkick);
+      //      message(0, "drift %d bin %d kick: %d->%d\n", times->Ti_Current, bin, times->Ti_kick[bin], newkick);
+            times->Ti_kick[bin] = newkick;
+        }
+    }
+    /* Advance the shorter bins without particles by the minimum occupied timestep.*/
+    for(bin=1; bin < times->mintimebin; bin++)
+        times->Ti_kick[bin] += dti_from_timebin(times->mintimebin)/2;
+    //    message(0, "drift %d bin %d kick: %d\n", times->Ti_Current, bin, times->Ti_kick[bin]);
     /* Now assign new timesteps and kick */
     #pragma omp parallel for
-    for(pa = 0; pa < NumActiveParticle; pa++)
+    for(pa = 0; pa < act->NumActiveParticle; pa++)
     {
-        const int i = get_active_particle(pa);
+        const int i = get_active_particle(act, pa);
+        if(P[i].Swallowed || P[i].IsGarbage)
+            continue;
         int bin = P[i].TimeBin;
+        if(bin > TIMEBINS)
+            endrun(4, "Particle %d (type %d, id %ld) had unexpected timebin %d\n", i, P[i].Type, P[i].ID, P[i].TimeBin);
+#ifdef DEBUG
+        if(isnan(gravkick[bin]) || gravkick[bin] == 0.)
+            endrun(5, "Bad kicks %lg bin %d tik %d\n", gravkick[bin], bin, times->Ti_kick[bin]);
+#endif
         inttime_t dti = dti_from_timebin(bin);
-        /* current Kick time */
-        inttime_t tistart = P[i].Ti_kick;
-        /* half of a step */
-        inttime_t tiend = P[i].Ti_kick + dti / 2;
+        const double dt_entr = dloga_from_dti(dti/2, times->Ti_Current);
         /*This only changes particle i, so is thread-safe.*/
-        do_the_short_range_kick(i, tistart, tiend);
+        do_the_short_range_kick(i, dt_entr, gravkick[bin], hydrokick[bin]);
     }
     walltime_measure("/Timeline/HalfKick/Short");
 }
 
 void
-apply_PM_half_kick(void)
+apply_PM_half_kick(Cosmology * CP, DriftKickTimes * times)
 {
     /*Always do a PM half-kick, because this should be called just after a PM step*/
-    const inttime_t tistart = PM.Ti_kick;
-    const inttime_t tiend =  PM.Ti_kick + PM.length / 2;
+    const inttime_t tistart = times->PM_kick;
+    const inttime_t tiend =  tistart + times->PM_length / 2;
     /* Do long-range kick */
-    do_the_long_range_kick(tistart, tiend);
-    walltime_measure("/Timeline/HalfKick/Long");
-}
-
-/*Advance a long-range timestep and do the desired kick.*/
-void
-do_the_long_range_kick(inttime_t tistart, inttime_t tiend)
-{
     int i;
-    const double Fgravkick = get_gravkick_factor(tistart, tiend);
+    const double Fgravkick = get_exact_gravkick_factor(CP, tistart, tiend);
 
     #pragma omp parallel for
     for(i = 0; i < PartManager->NumPart; i++)
     {
         int j;
+        if(P[i].Swallowed || P[i].IsGarbage)
+            continue;
         for(j = 0; j < 3; j++)	/* do the kick */
             P[i].Vel[j] += P[i].GravPM[j] * Fgravkick;
     }
-    PM.Ti_kick = tiend;
+    times->PM_kick = tiend;
+    walltime_measure("/Timeline/HalfKick/Long");
 }
 
 void
-do_the_short_range_kick(int i, inttime_t tistart, inttime_t tiend)
+do_the_short_range_kick(int i, double dt_entr, double Fgravkick, double Fhydrokick)
 {
-    const double Fgravkick = get_gravkick_factor(tistart, tiend);
-
     int j;
-#ifdef DEBUG
-    if(P[i].Ti_kick != tistart) {
-        endrun(1, "Ti kick mismatch\n");
-    }
-
-#endif
-    /* update the time stamp */
-    P[i].Ti_kick = tiend;
-
-    /* do the kick */
-
     for(j = 0; j < 3; j++)
-    {
         P[i].Vel[j] += P[i].GravAccel[j] * Fgravkick;
+
+    /* Add kick from dynamic friction and hydro drag for BHs. */
+    if(P[i].Type == 5) {
+        for(j = 0; j < 3; j++){
+            P[i].Vel[j] += BHP(i).DFAccel[j] * Fgravkick;
+            P[i].Vel[j] += BHP(i).DragAccel[j] * Fgravkick;
+        }
     }
 
     if(P[i].Type == 0) {
-        const double Fhydrokick = get_hydrokick_factor(tistart, tiend);
         /* Add kick from hydro and SPH stuff */
         for(j = 0; j < 3; j++) {
             P[i].Vel[j] += SPHP(i).HydroAccel[j] * Fhydrokick;
         }
-
         /* Code here imposes a hard limit (default to speed of light)
          * on the gas velocity. This should rarely be hit.*/
         double vv=0;
@@ -319,11 +429,11 @@ do_the_short_range_kick(int i, inttime_t tistart, inttime_t tiend)
             vv += P[i].Vel[j] * P[i].Vel[j];
         vv = sqrt(vv);
 
-        if(vv > 0 && vv/All.cf.a > All.MaxGasVel) {
-            message(1,"Gas Particle ID %ld exceeded the gas velocity limit: %g > %g\n",P[i].ID, vv / All.cf.a, All.MaxGasVel);
+        if(vv > 0 && vv/All.cf.a > TimestepParams.MaxGasVel) {
+            message(1,"Gas Particle ID %ld exceeded the gas velocity limit: %g > %g\n",P[i].ID, vv / All.cf.a, TimestepParams.MaxGasVel);
             for(j=0;j < 3; j++)
             {
-                P[i].Vel[j] *= All.MaxGasVel * All.cf.a / vv;
+                P[i].Vel[j] *= TimestepParams.MaxGasVel * All.cf.a / vv;
             }
         }
 
@@ -331,15 +441,13 @@ do_the_short_range_kick(int i, inttime_t tistart, inttime_t tiend)
            hence temperature) decreases by more than a factor 0.5.
            This limiter is here as well as in sfr_eff.c because the
            timestep may increase. */
-
-        const double dt_entr = dloga_from_dti(tiend-tistart);
         if(SPHP(i).DtEntropy * dt_entr < -0.5 * SPHP(i).Entropy)
             SPHP(i).Entropy *= 0.5;
         else
             SPHP(i).Entropy += SPHP(i).DtEntropy * dt_entr;
 
         /* Limit entropy in simulations with cooling disabled*/
-        const double enttou = pow(SPH_EOMDensity(i) * All.cf.a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
+        const double enttou = pow(SPHP(i).Density * All.cf.a3inv, GAMMA_MINUS1) / GAMMA_MINUS1;
         if(SPHP(i).Entropy < All.MinEgySpec/enttou)
             SPHP(i).Entropy = All.MinEgySpec / enttou;
     }
@@ -353,11 +461,11 @@ do_the_short_range_kick(int i, inttime_t tistart, inttime_t tiend)
 #endif
 }
 
-double
-get_timestep_dloga(const int p)
+static double
+get_timestep_dloga(const int p, const inttime_t Ti_Current, enum TimeStepType * titype)
 {
     double ac = 0;
-    double dt = 0, dt_courant = 0;
+    double dt = 0, dt_courant = 0, dt_hsml = 0;
 
     /*Compute physical acceleration*/
     {
@@ -384,14 +492,24 @@ get_timestep_dloga(const int p)
         ac = 1.0e-30;
 
     /* mind the factor 2.8 difference between gravity and softening used here. */
-    dt = sqrt(2 * All.ErrTolIntAccuracy * All.cf.a * (FORCE_SOFTENING(p) / 2.8) / ac);
+    dt = sqrt(2 * TimestepParams.ErrTolIntAccuracy * All.cf.a * (FORCE_SOFTENING(p, P[p].Type) / 2.8) / ac);
+    *titype = TI_ACCEL;
 
     if(P[p].Type == 0)
     {
         const double fac3 = pow(All.Time, 3 * (1 - GAMMA) / 2.0);
-        dt_courant = 2 * All.CourantFac * All.Time * P[p].Hsml / (fac3 * SPHP(p).MaxSignalVel);
-        if(dt_courant < dt)
+        dt_courant = 2 * TimestepParams.CourantFac * All.Time * P[p].Hsml / (fac3 * SPHP(p).MaxSignalVel);
+        if(dt_courant < dt) {
             dt = dt_courant;
+            *titype = TI_COURANT;
+        }
+        /* This timestep criterion is from Gadget-4, eq. 0 of 2010.03567 and stops
+         * particles having too large a density change.*/
+        dt_hsml = TimestepParams.CourantFac * All.Time * All.Time * fabs(P[p].Hsml / (P[p].DtHsml + 1e-20));
+        if(dt_hsml < dt) {
+            dt = dt_hsml;
+            *titype = TI_HSML;
+        }
     }
 
     if(P[p].Type == 5)
@@ -399,15 +517,21 @@ get_timestep_dloga(const int p)
         if(BHP(p).Mdot > 0 && BHP(p).Mass > 0)
         {
             double dt_accr = 0.25 * BHP(p).Mass / BHP(p).Mdot;
-            if(dt_accr < dt)
+            if(dt_accr < dt) {
                 dt = dt_accr;
+                *titype = TI_ACCRETE;
+            }
         }
-        if(BHP(p).minTimeBin > 0 && BHP(p).minTimeBin < TIMEBINS) {
-            double dt_limiter = get_dloga_for_bin(BHP(p).minTimeBin) / All.cf.hubble;
+        if(BHP(p).minTimeBin > 0 && BHP(p).minTimeBin+1 < TIMEBINS) {
+            double dt_limiter = get_dloga_for_bin(BHP(p).minTimeBin+1, Ti_Current) / All.cf.hubble;
             /* Set the black hole timestep to the minimum timesteps of neighbouring gas particles.
              * It should be at least this for accretion accuracy, and it does not make sense to
-             * make it less than this.*/
+             * make it less than this. We go one timestep up because often the smallest
+             * timebin particle is cooling, and so increases its timestep. Then the smallest timebin
+             * contains only the BH which doesn't make much numerical sense. Accretion accuracy is not much changed
+             * by one timestep difference.*/
             dt = dt_limiter;
+            *titype = TI_NEIGH;
         }
     }
 
@@ -423,7 +547,7 @@ get_timestep_dloga(const int p)
  *  p -> particle index
  *  dti_max -> maximal timestep.  */
 static inttime_t
-get_timestep_ti(const int p, const inttime_t dti_max)
+get_timestep_ti(const int p, const inttime_t dti_max, const inttime_t Ti_Current, enum TimeStepType * titype)
 {
     inttime_t dti;
     /*Give a useful message if we are broken*/
@@ -434,14 +558,15 @@ get_timestep_ti(const int p, const inttime_t dti_max)
     if(!All.TreeGravOn)
         return dti_max;
 
-    double dloga = get_timestep_dloga(p);
+    double dloga = get_timestep_dloga(p, Ti_Current, titype);
 
-    if(dloga < All.MinSizeTimestep)
-        dloga = All.MinSizeTimestep;
+    if(dloga < TimestepParams.MinSizeTimestep)
+        dloga = TimestepParams.MinSizeTimestep;
 
-    dti = dti_from_dloga(dloga);
+    dti = dti_from_dloga(dloga, Ti_Current);
 
-    if(dti > dti_max)
+    /* Check for overflow*/
+    if(dti > dti_max || dti < 0)
         dti = dti_max;
 
     /*
@@ -449,16 +574,21 @@ get_timestep_ti(const int p, const inttime_t dti_max)
     */
     if(dti <= 1 || dti > (inttime_t) TIMEBASE)
     {
-        message(1, "Bad timestep (%x) assigned! ID=%lu Type=%d dloga=%g dtmax=%x xyz=(%g|%g|%g) tree=(%g|%g|%g) PM=(%g|%g|%g)\n",
-                dti, P[p].ID, P[p].Type, dloga, dti_max,
+        if(P[p].Type == 0)
+            message(1, "Bad timestep (%x)! titype %d. ID=%lu Type=%d dloga=%g dtmax=%x xyz=(%g|%g|%g) tree=(%g|%g|%g) PM=(%g|%g|%g) hydro-frc=(%g|%g|%g) dens=%g hsml=%g dh = %g Entropy=%g, dtEntropy=%g maxsignal=%g\n",
+                dti, *titype, P[p].ID, P[p].Type, dloga, dti_max,
+                P[p].Pos[0], P[p].Pos[1], P[p].Pos[2],
+                P[p].GravAccel[0], P[p].GravAccel[1], P[p].GravAccel[2],
+                P[p].GravPM[0], P[p].GravPM[1], P[p].GravPM[2],
+                SPHP(p).HydroAccel[0], SPHP(p).HydroAccel[1], SPHP(p).HydroAccel[2],
+                SPHP(p).Density, P[p].Hsml, P[p].DtHsml, SPHP(p).Entropy, SPHP(p).DtEntropy, SPHP(p).MaxSignalVel);
+        else
+            message(1, "Bad timestep (%x)! titype %d. ID=%lu Type=%d dloga=%g dtmax=%x xyz=(%g|%g|%g) tree=(%g|%g|%g) PM=(%g|%g|%g)\n",
+                dti, *titype, P[p].ID, P[p].Type, dloga, dti_max,
                 P[p].Pos[0], P[p].Pos[1], P[p].Pos[2],
                 P[p].GravAccel[0], P[p].GravAccel[1], P[p].GravAccel[2],
                 P[p].GravPM[0], P[p].GravPM[1], P[p].GravPM[2]
               );
-        if(P[p].Type == 0)
-            message(1, "hydro-frc=(%g|%g|%g) dens=%g hsml=%g numngb=%g egyrho=%g dhsmlegydensityfactor=%g Entropy=%g, dtEntropy=%g\n",
-                    SPHP(p).HydroAccel[0], SPHP(p).HydroAccel[1], SPHP(p).HydroAccel[2], SPHP(p).Density, P[p].Hsml, P[p].NumNgb, SPH_EOMDensity(p),
-                    SPHP(p).DhsmlEgyDensityFactor, SPHP(p).Entropy, SPHP(p).DtEntropy);
     }
 
     return dti;
@@ -471,13 +601,13 @@ get_timestep_ti(const int p, const inttime_t dti_max)
  *  Note that the latter is estimated using the assigned particle masses, separately for each particle type.
  */
 double
-get_long_range_timestep_dloga()
+get_long_range_timestep_dloga(void)
 {
     int i, type;
     int count[6];
     int64_t count_sum[6];
     double v[6], v_sum[6], mim[6], min_mass[6];
-    double dloga = All.MaxSizeTimestep;
+    double dloga = TimestepParams.MaxSizeTimestep;
 
     for(type = 0; type < 6; type++)
     {
@@ -539,9 +669,9 @@ get_long_range_timestep_dloga()
             /* "Avg. radius" of smallest particle: (min_mass/total_mass)^1/3 */
             dmean = pow(min_mass[type] / (omega * 3 * All.CP.Hubble * All.CP.Hubble / (8 * M_PI * All.G)), 1.0 / 3);
 
-            dloga1 = All.MaxRMSDisplacementFac * All.cf.hubble * All.cf.a * All.cf.a * DMIN(asmth, dmean) / sqrt(v_sum[type] / count_sum[type]);
-            message(0, "type=%d  dmean=%g asmth=%g minmass=%g a=%g  sqrt(<p^2>)=%g  dlogmax=%g\n",
-                    type, dmean, asmth, min_mass[type], All.Time, sqrt(v_sum[type] / count_sum[type]), dloga);
+            dloga1 = TimestepParams.MaxRMSDisplacementFac * All.cf.hubble * All.cf.a * All.cf.a * DMIN(asmth, dmean) / sqrt(v_sum[type] / count_sum[type]);
+            message(0, "type=%d  dmean=%g asmth=%g minmass=%g a=%g  sqrt(<p^2>)=%g  dloga=%g\n",
+                    type, dmean, asmth, min_mass[type], All.Time, sqrt(v_sum[type] / count_sum[type]), dloga1);
 
             /* don't constrain the step to the neutrinos */
             if(type != All.FastParticleType && dloga1 < dloga)
@@ -549,8 +679,8 @@ get_long_range_timestep_dloga()
         }
     }
 
-    if(dloga < All.MinSizeTimestep) {
-        dloga = All.MinSizeTimestep;
+    if(dloga < TimestepParams.MinSizeTimestep) {
+        dloga = TimestepParams.MinSizeTimestep;
     }
 
     return dloga;
@@ -558,19 +688,19 @@ get_long_range_timestep_dloga()
 
 /* backward compatibility with the old loop. */
 inttime_t
-get_PM_timestep_ti(inttime_t Ti_Current)
+get_PM_timestep_ti(const DriftKickTimes * const times)
 {
     double dloga = get_long_range_timestep_dloga();
 
-    inttime_t dti = dti_from_dloga(dloga);
+    inttime_t dti = dti_from_dloga(dloga, times->Ti_Current);
     dti = round_down_power_of_two(dti);
 
-    SyncPoint * next = find_next_sync_point(Ti_Current);
+    SyncPoint * next = find_next_sync_point(times->Ti_Current);
     if(next == NULL)
         endrun(0, "Trying to go beyond the last sync point. This happens only at TimeMax \n");
 
     /* go no more than the next sync point */
-    inttime_t dti_max = next->ti - PM.Ti_kick;
+    inttime_t dti_max = next->ti - times->PM_kick;
 
     if(dti > dti_max)
         dti = dti_max;
@@ -609,45 +739,52 @@ inttime_t find_next_kick(inttime_t Ti_Current, int minTimeBin)
     return Ti_Current + dti_from_timebin(minTimeBin);
 }
 
-static void print_timebin_statistics(int NumCurrentTiStep, int * TimeBinCountType);
+static void print_timebin_statistics(const DriftKickTimes * const times, const int NumCurrentTiStep, int * TimeBinCountType);
 
 /* mark the bins that will be active before the next kick*/
-int rebuild_activelist(inttime_t Ti_Current, int NumCurrentTiStep)
+int rebuild_activelist(ActiveParticles * act, const DriftKickTimes * const times, int NumCurrentTiStep)
 {
     int i;
 
+    int NumThreads = omp_get_max_threads();
     /*Since we use a static schedule, only need NumPart/NumThreads elements per thread.*/
-    int narr = PartManager->NumPart / All.NumThreads + 2;
+    size_t narr = PartManager->NumPart / NumThreads + NumThreads;
 
     /*We know all particles are active on a PM timestep*/
-    if(is_PM_timestep(Ti_Current)) {
-        ActiveParticle = NULL;
-        NumActiveParticle = PartManager->NumPart;
+    if(is_PM_timestep(times)) {
+        act->ActiveParticle = NULL;
+        act->NumActiveParticle = PartManager->NumPart;
     }
     else {
         /*Need space for more particles than we have, because of star formation*/
-        ActiveParticle = (int *) mymalloc("ActiveParticle", narr * All.NumThreads * sizeof(int));
-        NumActiveParticle = 0;
+        act->ActiveParticle = (int *) mymalloc("ActiveParticle", narr * NumThreads * sizeof(int));
+        act->NumActiveParticle = 0;
     }
 
-    int * TimeBinCountType = mymalloc("TimeBinCountType", 6*(TIMEBINS+1)*All.NumThreads * sizeof(int));
-    memset(TimeBinCountType, 0, 6 * (TIMEBINS+1) * All.NumThreads * sizeof(int));
+    int * TimeBinCountType = mymalloc("TimeBinCountType", 6*(TIMEBINS+1)*NumThreads * sizeof(int));
+    memset(TimeBinCountType, 0, 6 * (TIMEBINS+1) * NumThreads * sizeof(int));
 
     /*We want a lockless algorithm which preserves the ordering of the particle list.*/
-    size_t *NActiveThread = ta_malloc("NActiveThread", size_t, All.NumThreads);
-    int **ActivePartSets = ta_malloc("ActivePartSets", int *, All.NumThreads);
-    gadget_setup_thread_arrays(ActiveParticle, ActivePartSets, NActiveThread, narr, All.NumThreads);
+    size_t *NActiveThread = ta_malloc("NActiveThread", size_t, NumThreads);
+    int **ActivePartSets = ta_malloc("ActivePartSets", int *, NumThreads);
+    gadget_setup_thread_arrays(act->ActiveParticle, ActivePartSets, NActiveThread, narr, NumThreads);
 
-    /* We enforce schedule static to ensure that each thread executes on contiguous particles.
-     * chunk size is not specified and so is the largest possible.*/
-    #pragma omp parallel for schedule(static)
+    /* We enforce schedule static to imply monotonic, ensure that each thread executes on contiguous particles
+     * and ensure no thread gets more than narr particles.*/
+    size_t schedsz = PartManager->NumPart / NumThreads + 1;
+    #pragma omp parallel for schedule(static, schedsz)
     for(i = 0; i < PartManager->NumPart; i++)
     {
         const int bin = P[i].TimeBin;
         const int tid = omp_get_thread_num();
-        if(P[i].IsGarbage)
+        if(P[i].IsGarbage || P[i].Swallowed)
             continue;
-        if(ActiveParticle && is_timebin_active(bin, Ti_Current))
+        /* when we are in PM, all particles must have been synced. */
+        if (P[i].Ti_drift != times->Ti_Current) {
+            endrun(5, "Particle %d type %d has drift time %x not ti_current %x!",i, P[i].Type, P[i].Ti_drift, times->Ti_Current);
+        }
+
+        if(act->ActiveParticle && is_timebin_active(bin, times->Ti_Current))
         {
             /* Store this particle in the ActiveSet for this thread*/
             ActivePartSets[tid][NActiveThread[tid]] = i;
@@ -655,37 +792,43 @@ int rebuild_activelist(inttime_t Ti_Current, int NumCurrentTiStep)
         }
         TimeBinCountType[(TIMEBINS + 1) * (6* tid + P[i].Type) + bin] ++;
     }
-    if(ActiveParticle) {
+    if(act->ActiveParticle) {
         /*Now we want a merge step for the ActiveParticle list.*/
-        NumActiveParticle = gadget_compact_thread_arrays(ActiveParticle, ActivePartSets, NActiveThread, All.NumThreads);
+        act->NumActiveParticle = gadget_compact_thread_arrays(act->ActiveParticle, ActivePartSets, NActiveThread, NumThreads);
     }
     ta_free(ActivePartSets);
     ta_free(NActiveThread);
 
     /*Print statistics for this time bin*/
-    print_timebin_statistics(NumCurrentTiStep, TimeBinCountType);
+    print_timebin_statistics(times, NumCurrentTiStep, TimeBinCountType);
     myfree(TimeBinCountType);
 
     /* Shrink the ActiveParticle array. We still need extra space for star formation,
      * but we do not need space for the known-inactive particles*/
-    if(ActiveParticle)
-        ActiveParticle = myrealloc(ActiveParticle, sizeof(int)*(NumActiveParticle + PartManager->MaxPart - PartManager->NumPart));
+    if(act->ActiveParticle) {
+        act->ActiveParticle = myrealloc(act->ActiveParticle, sizeof(int)*(act->NumActiveParticle + PartManager->MaxPart - PartManager->NumPart));
+        act->MaxActiveParticle = act->NumActiveParticle + PartManager->MaxPart - PartManager->NumPart;
+        /* listen to the slots events such that we can set timebin of new particles */
+    }
+    event_listen(&EventSlotsFork, timestep_eh_slots_fork, act);
     walltime_measure("/Timeline/Active");
 
     return 0;
 }
 
-void free_activelist(void)
+void free_activelist(ActiveParticles * act)
 {
-    if(ActiveParticle)
-        myfree(ActiveParticle);
+    if(act->ActiveParticle) {
+        myfree(act->ActiveParticle);
+    }
+    event_unlisten(&EventSlotsFork, timestep_eh_slots_fork, act);
 }
 
 /*! This routine writes one line for every timestep.
  * FdCPU the cumulative cpu-time consumption in various parts of the
  * code is stored.
  */
-static void print_timebin_statistics(int NumCurrentTiStep, int * TimeBinCountType)
+static void print_timebin_statistics(const DriftKickTimes * const times, const int NumCurrentTiStep, int * TimeBinCountType)
 {
     double z;
     int i;
@@ -695,8 +838,9 @@ static void print_timebin_statistics(int NumCurrentTiStep, int * TimeBinCountTyp
     int64_t tot_num_force = 0;
     int64_t TotNumPart = 0, TotNumType[6] = {0};
 
+    int NumThreads = omp_get_max_threads();
     /*Sum the thread-local memory*/
-    for(i = 1; i < All.NumThreads; i ++) {
+    for(i = 1; i < NumThreads; i ++) {
         int j;
         for(j=0; j < 6 * (TIMEBINS+1); j++)
             TimeBinCountType[j] += TimeBinCountType[6 * (TIMEBINS+1) * i + j];
@@ -714,18 +858,18 @@ static void print_timebin_statistics(int NumCurrentTiStep, int * TimeBinCountTyp
             TotNumType[j] += tot_count_type[j][i];
             TotNumPart += tot_count_type[j][i];
         }
-        if(is_timebin_active(i, All.Ti_Current))
+        if(is_timebin_active(i, times->Ti_Current))
             tot_num_force += tot_count[i];
     }
 
     char extra[20] = {0};
 
-    if(is_PM_timestep(All.Ti_Current))
+    if(is_PM_timestep(times))
         strcat(extra, "PM-Step");
 
     z = 1.0 / (All.Time) - 1;
     message(0, "Begin Step %d, Time: %g (%x), Redshift: %g, Nf = %014ld, Systemstep: %g, Dloga: %g, status: %s\n",
-                NumCurrentTiStep, All.Time, All.Ti_Current, z, tot_num_force,
+                NumCurrentTiStep, All.Time, times->Ti_Current, z, tot_num_force,
                 All.TimeStep, log(All.Time) - log(All.Time - All.TimeStep),
                 extra);
 
@@ -736,7 +880,7 @@ static void print_timebin_statistics(int NumCurrentTiStep, int * TimeBinCountTyp
     for(i = TIMEBINS;  i >= 0; i--) {
         if(tot_count[i] == 0) continue;
         message(0, " %c bin=%2d % 12ld % 12ld % 12ld % 12ld % 12ld % 12ld %6g\n",
-                is_timebin_active(i, All.Ti_Current) ? 'X' : ' ',
+                is_timebin_active(i, times->Ti_Current) ? 'X' : ' ',
                 i,
                 tot_count_type[0][i],
                 tot_count_type[1][i],
@@ -744,9 +888,9 @@ static void print_timebin_statistics(int NumCurrentTiStep, int * TimeBinCountTyp
                 tot_count_type[3][i],
                 tot_count_type[4][i],
                 tot_count_type[5][i],
-                get_dloga_for_bin(i));
+                get_dloga_for_bin(i, times->Ti_Current));
 
-        if(is_timebin_active(i, All.Ti_Current))
+        if(is_timebin_active(i, times->Ti_Current))
         {
             tot += tot_count[i];
             int ptype;
@@ -760,4 +904,3 @@ static void print_timebin_statistics(int NumCurrentTiStep, int * TimeBinCountTyp
         tot_type[0], tot_type[1], tot_type[2], tot_type[3], tot_type[4], tot_type[5], tot);
 
 }
-

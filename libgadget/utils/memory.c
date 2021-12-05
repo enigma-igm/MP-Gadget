@@ -26,12 +26,14 @@ allocator_init(Allocator * alloc, const char * name, size_t request_size, int ze
     size_t size = (request_size / ALIGNMENT + 1) * ALIGNMENT;
 
     void * rawbase;
-    if (parent)
+    if (parent) {
         rawbase = allocator_alloc(parent, name, size + ALIGNMENT, ALLOC_DIR_BOT, "Child");
+        if(rawbase == NULL)
+            return ALLOC_ENOMEMORY;
+    }
     else
-        rawbase = malloc(size + ALIGNMENT);
-
-    if (rawbase == NULL) return ALLOC_ENOMEMORY;
+        if(posix_memalign(&rawbase, ALIGNMENT, size + ALIGNMENT))
+            return ALLOC_ENOMEMORY;
 
     alloc->parent = parent;
     alloc->rawbase = rawbase;
@@ -39,6 +41,9 @@ allocator_init(Allocator * alloc, const char * name, size_t request_size, int ze
     alloc->size = size;
     alloc->use_malloc = 0;
     strncpy(alloc->name, name, 11);
+    alloc->refcount = 1;
+    alloc->top = alloc->size;
+    alloc->bottom = 0;
 
     allocator_reset(alloc, zero);
 
@@ -52,12 +57,14 @@ allocator_malloc_init(Allocator * alloc, const char * name, size_t request_size,
     size_t size = ALIGNMENT * 4096;
 
     void * rawbase;
-    if (parent)
+    if (parent) {
         rawbase = allocator_alloc(parent, name, size + ALIGNMENT, ALLOC_DIR_BOT, "Child");
+        if (rawbase == NULL) return ALLOC_ENOMEMORY;
+    }
     else
-        rawbase = malloc(size + ALIGNMENT);
+        if(posix_memalign(&rawbase, ALIGNMENT, size + ALIGNMENT))
+            return ALLOC_ENOMEMORY;
 
-    if (rawbase == NULL) return ALLOC_ENOMEMORY;
 
     alloc->parent = parent;
     alloc->use_malloc = 1;
@@ -65,6 +72,9 @@ allocator_malloc_init(Allocator * alloc, const char * name, size_t request_size,
     alloc->base = rawbase;
     alloc->size = size;
     strncpy(alloc->name, name, 11);
+    alloc->refcount = 1;
+    alloc->top = alloc->size;
+    alloc->bottom = 0;
 
     allocator_reset(alloc, zero);
 
@@ -74,6 +84,14 @@ allocator_malloc_init(Allocator * alloc, const char * name, size_t request_size,
 int
 allocator_reset(Allocator * alloc, int zero)
 {
+    /* Free the memory when using malloc*/
+    if(alloc->use_malloc) {
+        AllocatorIter iter[1];
+        for(allocator_iter_start(iter, alloc); !allocator_iter_ended(iter); allocator_iter_next(iter))
+        {
+            free(iter->ptr - ALIGNMENT);
+        }
+    }
     alloc->refcount = 1;
     alloc->top = alloc->size;
     alloc->bottom = 0;
@@ -130,18 +148,19 @@ allocator_alloc_va(Allocator * alloc, const char * name, size_t request_size, in
 
     vsprintf(header->annotation, fmt, va);
 
-    char * cptr;
+    void * cptr;
     if(alloc->use_malloc) {
         /* prepend a copy of the header to the malloc block; allocator_free will use it*/
-        cptr = malloc(request_size + ALIGNMENT);
-        header->ptr = cptr + ALIGNMENT;
+        if(posix_memalign(&cptr, ALIGNMENT, request_size + ALIGNMENT))
+            endrun(1, "Failed malloc: %lu bytes for %s\n", request_size, header->name);
+        header->ptr = (char *) cptr + ALIGNMENT;
         memcpy(cptr, header, ALIGNMENT);
-        cptr += ALIGNMENT;
+        cptr = header->ptr;
     } else {
-        cptr = ptr + ALIGNMENT;
+        cptr = (char *) ptr + ALIGNMENT;
         header->ptr = cptr;
     }
-    return (void*) (cptr);
+    return cptr;
 }
 void *
 allocator_alloc(Allocator * alloc, const char * name, size_t request_size, int dir, char * fmt, ...)
@@ -206,7 +225,7 @@ allocator_iter_next(
     }
     if (! is_header(header)) {
         /* several corruption that shall not happen */
-        abort();
+        endrun(5, "Ptr %p is not a magic header\n", header);
     }
     iter->ptr =  header->ptr;
     iter->name = header->name;
@@ -226,15 +245,28 @@ allocator_iter_ended(AllocatorIter * iter)
 size_t
 allocator_get_free_size(Allocator * alloc)
 {
-    /*For malloc, return an arbitrary large number*/
-    if(alloc->use_malloc)
-        return 1L<<47;
+    /*For malloc, return a fixed 2GB */
+    if(alloc->use_malloc) {
+        return 2L*1024L*1024L*1024L;
+    }
     return (alloc->top - alloc->bottom);
 }
 
 size_t
 allocator_get_used_size(Allocator * alloc, int dir)
 {
+    /* For malloc sum up the requested memory.
+     * I considered mallinfo, but there may be multiple memory arenas. */
+    if(alloc->use_malloc) {
+        size_t total = 0;
+        AllocatorIter iter[1];
+        for(allocator_iter_start(iter, alloc); !allocator_iter_ended(iter);
+            allocator_iter_next(iter))
+        {
+            total += iter->request_size;
+        }
+        return total;
+    }
     if (dir == ALLOC_DIR_TOP) {
         return (alloc->size - alloc->top);
     }
@@ -255,24 +287,24 @@ allocator_print(Allocator * alloc)
                 alloc->name,
                 alloc->use_malloc?"(libc managed)":"(self managed)"
                 );
-    message(1, " Total: %010td bytes\n", alloc->size);
+    message(1, " Total: %010td kbytes\n", alloc->size/1024);
     message(1, " Free: %010td Used: %010td Top: %010td Bottom: %010td \n",
-            allocator_get_free_size(alloc),
-            allocator_get_used_size(alloc, ALLOC_DIR_BOTH),
-            allocator_get_used_size(alloc, ALLOC_DIR_TOP),
-            allocator_get_used_size(alloc, ALLOC_DIR_BOT)
+            allocator_get_free_size(alloc)/1024,
+            allocator_get_used_size(alloc, ALLOC_DIR_BOTH)/1024,
+            allocator_get_used_size(alloc, ALLOC_DIR_TOP)/1024,
+            allocator_get_used_size(alloc, ALLOC_DIR_BOT)/1024
             );
     AllocatorIter iter[1];
-    message(1, " %-20s | %c | %-10s %-10s | %s\n", "Name", 'd', "Requested", "Allocated", "Annotation");
+    message(1, " %-20s | %c | %-12s %-12s | %s\n", "Name", 'd', "Requested", "Allocated", "Annotation");
     message(1, "-------------------------------------------------------\n");
     for(allocator_iter_start(iter, alloc);
         !allocator_iter_ended(iter);
         allocator_iter_next(iter))
     {
-        message(1, " %-20s | %c | %010td %010td | %s\n",
+        message(1, " %-20s | %c | %012td %012td | %s\n",
                  iter->name,
                  "T?B"[iter->dir + 1],
-                 iter->request_size, iter->size, iter->annotation);
+                 iter->request_size/1024, iter->size/1024, iter->annotation);
     }
 }
 

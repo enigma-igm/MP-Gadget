@@ -7,13 +7,11 @@
 
 #include "utils.h"
 
-#include "allvars.h"
 #include "cooling.h"
 #include "densitykernel.h"
 #include "treewalk.h"
-#include "timestep.h"
-
 #include "gravshort.h"
+#include "walltime.h"
 
 static void
 grav_short_pair_ngbiter(
@@ -22,9 +20,18 @@ grav_short_pair_ngbiter(
         TreeWalkNgbIterGravShort * iter,
         LocalTreeWalk * lv);
 
-void grav_short_pair(ForceTree * tree)
+void
+grav_short_pair(const ActiveParticles * act, PetaPM * pm, ForceTree * tree, double Rcut, double rho0, int NeutrinoTracer, int FastParticleType)
 {
     TreeWalk tw[1] = {{0}};
+
+    struct GravShortPriv priv;
+    priv.cellsize = tree->BoxSize / pm->Nmesh;
+    priv.Rcut = Rcut * pm->Asmth * priv.cellsize;
+    priv.FastParticleType = FastParticleType;
+    priv.NeutrinoTracer = NeutrinoTracer;
+    priv.G = pm->G;
+    priv.cbrtrho0 = pow(rho0, 1.0 / 3);
 
     message(0, "Starting pair-wise short range gravity...\n");
 
@@ -40,12 +47,13 @@ void grav_short_pair(ForceTree * tree)
     tw->query_type_elsize = sizeof(TreeWalkQueryGravShort);
     tw->result_type_elsize = sizeof(TreeWalkResultGravShort);
     tw->tree = tree;
+    tw->priv = &priv;
 
     walltime_measure("/Misc");
 
-    treewalk_run(tw, ActiveParticle, NumActiveParticle);
+    treewalk_run(tw, act->ActiveParticle, act->NumActiveParticle);
 
-    walltime_measure("/Grav/Short");
+    walltime_measure("/Tree/Pairwise");
 }
 
 
@@ -56,8 +64,10 @@ grav_short_pair_ngbiter(
         TreeWalkNgbIterGravShort * iter,
         LocalTreeWalk * lv)
 {
+    const double cellsize = GRAV_GET_PRIV(lv->tw)->cellsize;
+
     if(iter->base.other == -1) {
-        iter->base.Hsml = RCUT * All.Asmth * All.BoxSize / All.Nmesh;
+        iter->base.Hsml = GRAV_GET_PRIV(lv->tw)->Rcut;
         iter->base.mask = 0xff; /* all particles */
         iter->base.symmetric = NGB_TREEFIND_ASYMMETRIC;
         return;
@@ -73,10 +83,14 @@ grav_short_pair_ngbiter(
                   " We haven't implemented tracer particles and this shall not happen\n");
     }
 
+    /* Don't include neutrino tracers*/
+    if(GRAV_GET_PRIV(lv->tw)->NeutrinoTracer && P[other].Type == GRAV_GET_PRIV(lv->tw)->FastParticleType)
+        return;
+
     double mass = P[other].Mass;
 
     double h = I->Soft;
-    double otherh = FORCE_SOFTENING(other);
+    double otherh = FORCE_SOFTENING(other, P[other].Type);
     if (otherh > h) h = otherh;
 
     double fac, pot;
@@ -105,12 +119,11 @@ grav_short_pair_ngbiter(
         pot = mass * h_inv * wp;
     }
 
-    if (grav_apply_short_range_window(r, &fac, &pot) == 0) {
+    if (grav_apply_short_range_window(r, &fac, &pot, cellsize) == 0) {
         int d;
         for(d = 0; d < 3; d ++)
             O->Acc[d] += - dist[d] * fac;
 
         O->Potential += pot;
-        O->Ninteractions ++;
     }
 }

@@ -12,10 +12,7 @@
 
 #include <libgadget/physconst.h>
 #include "power.h"
-
-/*Defined in save.c*/
-void _bigfile_utils_create_block_from_c_array(BigFile * bf, void * baseptr, char * name, char * dtype, size_t dims[], ptrdiff_t elsize, MPI_Comm comm);
-
+#include "proto.h"
 static double Delta_EH(double k);
 static double Delta_Tabulated(double k, enum TransferType Type);
 static double sigma2_int(double k, void * params);
@@ -29,6 +26,9 @@ static double PrimordialIndex;
 static double UnitLength_in_cm;
 static Cosmology * CP;
 
+/* Small factor so a zero in the power spectrum is not
+ * a log(0) = -INF*/
+#define NUGGET 1e-30
 #define MAXCOLS 9
 
 struct table
@@ -41,7 +41,7 @@ struct table
 };
 
 /*Typedef for a function that parses the table from text*/
-typedef void (*_parse_fn)(int i, double k, char * line, struct table *, int *InputInLog10, const double InitTime);
+typedef void (*_parse_fn)(int i, double k, char * line, struct table *, int *InputInLog10, const double InitTime, int NumCol);
 
 
 static struct table power_table;
@@ -85,7 +85,7 @@ static double get_Tabulated(double k, enum TransferType Type, double oobval)
 
     /*Convert delta from (Mpc/h)^3/2 to kpc/h^3/2*/
     logD += 1.5 * log10(scale);
-    double delta = pow(10.0, logD) * trans;
+    double delta = (pow(10.0, logD)-NUGGET) * trans;
     if(!isfinite(delta))
         endrun(1,"infinite delta or growth: %g for k = %g, Type = %d (tk = %g, logD = %g)\n",delta, k, Type, trans, logD);
     return delta;
@@ -138,12 +138,12 @@ static void save_transfer(BigFile * bf, int ncol, struct table * ttable, const c
     char buf[100];
     snprintf(buf, 100, "%s/logk", bname);
 
-    _bigfile_utils_create_block_from_c_array(bf, ttable->logk, buf, "f8", dims, sizeof(double), MPI_COMM_WORLD);
+    _bigfile_utils_create_block_from_c_array(bf, ttable->logk, buf, "f8", dims, sizeof(double), 1, 1, MPI_COMM_WORLD);
 
     for(i = 0; i < ncol; i++)
     {
         snprintf(buf, 100, "%s/%s", bname, colnames[i]);
-        _bigfile_utils_create_block_from_c_array(bf, ttable->logD[i], buf, "f8", dims, sizeof(double), MPI_COMM_WORLD);
+        _bigfile_utils_create_block_from_c_array(bf, ttable->logD[i], buf, "f8", dims, sizeof(double), 1, 1, MPI_COMM_WORLD);
     }
 }
 
@@ -156,7 +156,7 @@ void save_all_transfer_tables(BigFile * bf, int ThisTask)
 }
 
 
-void parse_power(int i, double k, char * line, struct table *out_tab, int * InputInLog10, const double InitTime)
+void parse_power(int i, double k, char * line, struct table *out_tab, int * InputInLog10, const double InitTime, int NumCol)
 {
     char * retval;
     if((*InputInLog10) == 0) {
@@ -173,16 +173,16 @@ void parse_power(int i, double k, char * line, struct table *out_tab, int * Inpu
         endrun(1,"Incomplete line in power spectrum: %s\n",line);
     double p = atof(retval);
     if ((*InputInLog10) == 0)
-        p = log10(p);
+        p = log10(p+NUGGET);
     /*Store delta, square root of power*/
     out_tab->logD[0][i] = p/2;
 }
 
-void parse_transfer(int i, double k, char * line, struct table *out_tab, int * InputInLog10, const double InitTime)
+void parse_transfer(int i, double k, char * line, struct table *out_tab, int * InputInLog10, const double InitTime, int NumCol)
 {
     int j;
-    const int nnu = (CP->MNu[0] > 0) + (CP->MNu[1] > 0) + (CP->MNu[2] > 0);
-    const int ncols = 15 + nnu * 2;
+    int ncols = NumCol - 1; /* The first column k is already read in read_power_table. */
+    int nnu = round((ncols - 15)/2);
     double * transfers = mymalloc("transfers", sizeof(double) * ncols);
     k = log10(k);
     out_tab->logk[i] = k;
@@ -241,7 +241,7 @@ void read_power_table(int ThisTask, const char * inputfile, const int ncols, str
     FILE *fd = NULL;
     int j;
     int InputInLog10 = 0;
-
+    
     if(ThisTask == 0) {
         if(!(fd = fopen(inputfile, "r")))
             endrun(1, "can't read input spectrum in file '%s' on task %d\n", inputfile, ThisTask);
@@ -272,6 +272,27 @@ void read_power_table(int ThisTask, const char * inputfile, const int ncols, str
 
     if(ThisTask == 0)
     {
+        /* detect the columns of the input file */ 
+        char line1[1024];
+        
+        while(fgets(line1,1024,fd))
+        {
+            char * content = strtok(line1, " \t");
+            if(content[0] != '#') /*Find the first line*/         
+                break;
+        }  
+        int Ncolumns = 0;
+        char *c;
+        do
+        {
+            Ncolumns++;
+            c = strtok(NULL," \t");
+        }  
+        while(c != NULL);  
+        
+        rewind(fd);
+        message(0, "Detected %d columns in file '%s'. \n", Ncolumns, inputfile);
+        
         int i = 0;
         do
         {
@@ -284,7 +305,7 @@ void read_power_table(int ThisTask, const char * inputfile, const int ncols, str
             if(!retval || retval[0] == '#')
                 continue;
             double k = atof(retval);
-            parse_line(i, k, line, out_tab, &InputInLog10, InitTime);
+            parse_line(i, k, line, out_tab, &InputInLog10, InitTime, Ncolumns);
             i++;
         }
         while(1);
@@ -313,7 +334,7 @@ init_transfer_table(int ThisTask, double InitTime, const struct power_params * c
     /*Normalise the transfer functions.*/
 
     /*Now normalise the velocity transfer functions: divide by a * hubble, where hubble is the hubble function in Mpc^-1, so H0/c*/
-    const double fac = InitTime * hubble_function(InitTime)/CP->Hubble * 100 * CP->HubbleParam/(LIGHTCGS / 1e5);
+    const double fac = InitTime * hubble_function(CP, InitTime)/CP->Hubble * 100 * CP->HubbleParam/(LIGHTCGS / 1e5);
     const double onu = get_omega_nu(&CP->ONu, InitTime)*pow(InitTime,3);
     double meangrowth[VEL_TOT-VEL_BAR+1] = {0};
     /* At this point the transfer table contains: (3,4,5) t_b, 0.5 * h_prime, t_ncdm.
@@ -394,9 +415,12 @@ int init_powerspectrum(int ThisTask, double InitTime, double UnitLength_in_cm_in
         const double R8 = 8 * (CM_PER_MPC / UnitLength_in_cm);	/* 8 Mpc/h */
         if(ppar->Sigma8 > 0) {
             double res = TopHatSigma2(R8);
-            Norm = ppar->Sigma8 / sqrt(res);
+            if(isfinite(res) && res > 0)
+                Norm = ppar->Sigma8 / sqrt(res);
+            else
+                endrun(1, "Could not normalize P(k) to Sigma8=%g! Measured Sigma8^2 is %g\n", ppar->Sigma8, res);
         }
-        double Dplus = GrowthFactor(InitTime, 1/(1+ppar->InputPowerRedshift));
+        double Dplus = GrowthFactor(CP, InitTime, 1/(1+ppar->InputPowerRedshift));
         if(ppar->InputPowerRedshift >= 0) {
             Norm *= Dplus;
             message(0,"Growth factor from z=%g (InputPowerRedshift) to z=%g (Init): %g \n", ppar->InputPowerRedshift, 1. / InitTime - 1, Dplus);

@@ -12,9 +12,6 @@
 
 #include <libgadget/utils.h>
 
-int ThisTask;
-int NTask;
-
 #ifdef VALGRIND
 #define allocator_init allocator_malloc_init
 #endif
@@ -23,18 +20,18 @@ int
 _cmocka_run_group_tests_mpi(const char * name, const struct CMUnitTest tests[], size_t size, void * p1, void * p2)
 {
     MPI_Init(NULL, NULL);
-    MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+    int NTask;
     MPI_Comm_size(MPI_COMM_WORLD, &NTask);
 
-    init_endrun();
+    init_endrun(1);
 
     if(NTask != 1) {
         setenv("CMOCKA_TEST_ABORT", "1", 1);
     }
     /* allocate some memory for MAIN and TEMP */
 
-    allocator_init(A_MAIN, "MAIN", 256 * 1024 * 1024, 1, NULL);
-    allocator_init(A_TEMP, "TEMP", 8 * 1024 * 1024, 1, A_MAIN);
+    allocator_init(A_MAIN, "MAIN", 360 * 1024 * 1024, 0, NULL);
+    allocator_init(A_TEMP, "TEMP", 8 * 1024 * 1024, 0, A_MAIN);
 
     message(0, "GADGET_TESTDATA_ROOT : %s\n", GADGET_TESTDATA_ROOT);
 

@@ -72,9 +72,6 @@ void set_coolpar(struct cooling_params cp);
  * Defaults: TCMB 2.7255, recomb = Verner96, cooling = Sherwood.*/
 void init_cooling_rates(const char * TreeCoolFile, const char * RecFastFile, const char * MetalCoolFile, Cosmology * CP);
 
-/*Reads and initialises the tables for a spatially varying redshift of reionization*/
-void init_uvf_table(const char * UVFluctuationFile);
-
 /* Reads and initializes the cloudy metal cooling table. Called in init_cooling_rates. No need to call it separately.*/
 void InitMetalCooling(const char * MetalCoolFile);
 
@@ -100,10 +97,26 @@ double get_ne_by_nh(double density, double ienergy, double helium, const struct 
  */
 double get_heatingcooling_rate(double density, double ienergy, double helium, double redshift, double metallicity, const struct UVBG * uvbg, double * ne_equilib);
 
+enum CoolProcess {
+    RECOMB,
+    COLLIS,
+    FREEFREE,
+    HEAT
+};
+
+/* As above but returns only the specified heating rate. */
+double get_individual_cooling(enum CoolProcess process, double density, double ienergy, double helium, const struct UVBG * uvbg, double *ne_equilib);
+
+/* As above but returns only the Compton cooling. */
+double get_compton_cooling(double density, double ienergy, double helium, double redshift, double nebynh);
+
 /*Get the neutral hydrogen fraction at a given temperature and density.
 density is gas density in protons/cm^3
 Internal energy is in J/kg == 10^-10 ergs/g.
 helium is a mass fraction.*/
 double get_neutral_fraction_phys_cgs(double density, double ienergy, double helium, const struct UVBG * uvbg, double * ne_init);
+
+/* Get the helium ionic fractions at a temperature and density. Same conventions as above*/
+double get_helium_ion_phys_cgs(int ion, double density, double ienergy, double helium, const struct UVBG * uvbg, double ne_init);
 
 #endif

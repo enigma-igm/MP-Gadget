@@ -1,6 +1,10 @@
+#ifndef _HCI_H
+#define _HCI_H
+
 typedef struct HCIManager {
     /* private: */
     char * prefix;
+    int FOFEnabled;
     double TimeLastCheckPoint;
     double AutoCheckPointTime;
     double LongestTimeBetweenQueries;
@@ -27,12 +31,13 @@ typedef struct HCIAction
 {
     enum HCIActionType type;
     int write_snapshot;
+    int write_fof;
 } HCIAction;
 
 extern HCIManager HCI_DEFAULT_MANAGER[];
 
 void
-hci_init(HCIManager * manager, char * prefix, double TimeLimitCPU, double AutoCheckPointTime);
+hci_init(HCIManager * manager, char * prefix, double TimeLimitCPU, double AutoCheckPointTime, int FOFEnabled);
 
 void
 hci_action_init(HCIAction * action);
@@ -42,3 +47,5 @@ hci_query(HCIManager * manager, HCIAction * action);
 
 void
 hci_override_now(HCIManager * manager, double now);
+
+#endif
