@@ -264,7 +264,7 @@ int main(int argc, char **argv)
   for (i = 0; i < NumPartCDM; i++) {
       for (j = 0; j < 3; j++) {
           ICP[i].Pos[j] = dm_pos[i][j];
-          ICP[i].Vel[j] = dm_vel[i][j]*sqrt(All.TimeIC);
+          ICP[i].Vel[j] = dm_vel[i][j]*sqrt(All2.TimeIC);
       }
   }
 
@@ -335,7 +335,7 @@ int main(int argc, char **argv)
       for (i = NumPartCDM; i < NumPartCDM+NumPartGas; i++) {
           for (j = 0; j < 3; j++) {
               ICP[i].Pos[j] = gas_pos[i-NumPartCDM][j];
-              ICP[i].Vel[j] = gas_vel[i-NumPartCDM][j]*sqrt(All.TimeIC);
+              ICP[i].Vel[j] = gas_vel[i-NumPartCDM][j]*sqrt(All2.TimeIC);
           }
       }
       
@@ -387,7 +387,7 @@ int main(int argc, char **argv)
   walltime_report(stdout, 0, MPI_COMM_WORLD);
 
   message(0, "IC's copied from CICASS.\n");
-  message(0, "Initial scale factor = %g\n", All.TimeIC);
+  message(0, "Initial scale factor = %g\n", All2.TimeIC);
     
   //print_spec(ThisTask, All2.Ngrid, All2, &CP);
 
