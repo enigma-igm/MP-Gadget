@@ -1,0 +1,30 @@
+OutputDir = output_cdm # Directory for output
+FileBase = IC              # Base-filename of output files
+
+MaxMemSizePerNode = 0.2
+
+Ngrid = 64 # Size of cubic grid on which to create particles.
+
+BoxSize = 1000  # Periodic box size of simulation in comoving kpc/h
+
+Omega0 = 0.315      # Total matter density  (at z=0)
+OmegaLambda = 0.685      # Cosmological constant (at z=0)
+OmegaBaryon = 0.049     # Baryon density        (at z=0)
+ProduceGas = 1         # 1 = Produce gas  0 = no gas, just DM.
+RadiationOn = 1         #Enable background radiation
+HubbleParam = 0.675      # Hubble paramater (may be used for power spec parameterization)
+
+Redshift = 200        # Starting redshift
+
+DifferentTransferFunctions = 1
+# filename of tabulated input spectrum in Mpc/h units
+FileWithInputSpectrum = cdm_1Mpc_64_v30_IC.dat
+FileWithTransferFunction = junk
+
+PrimordialIndex = 0.965
+PrimordialAmp = 2.0989e-9
+Seed = 121567    #  seed for IC-generator
+
+UnitLength_in_cm = 3.085678e21   # defines length unit of output (in cm/h) 
+UnitMass_in_g = 1.989e43      # defines mass unit of output (in g/cm)
+UnitVelocity_in_cm_per_s = 1e5 # defines velocity unit of output (in cm/sec)
