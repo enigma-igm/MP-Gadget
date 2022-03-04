@@ -340,6 +340,21 @@ int main(int argc, char **argv)
   /*Now make the gas if required*/
   if(All2.ProduceGas) {
       
+      // Re-open the file
+      if(!(fd = fopen(fname, "r")))
+      {
+          printf("can't open file `%s`\n", fname);
+          exit(1);
+      }
+      
+      printf("reading `%s' ...\n", fname);
+      fflush(stdout);
+      
+      fread(&dummy, sizeof(dummy), 1, fd);
+      fread(&header1, sizeof(header1), 1, fd);
+      fread(&dummy, sizeof(dummy), 1, fd);
+      
+      
           /* Pos */
           fread(&dummy, sizeof(dummy), 1, fd);
           //printf("dummy position read");
