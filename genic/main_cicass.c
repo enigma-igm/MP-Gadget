@@ -157,6 +157,8 @@ int main(int argc, char **argv)
 
   int NumPartCDM = idgen_cdm->NumPart;
   int NumPartGas = idgen_gas->NumPart;
+    
+    printf("from igden: %i %i\n",NumPartCDM,NumPartGas);
 
   /*Space for both CDM and baryons*/
   struct ic_part_data * ICP = (struct ic_part_data *) mymalloc("PartTable", (NumPartCDM + All2.ProduceGas * NumPartGas)*sizeof(struct ic_part_data));
@@ -235,7 +237,7 @@ int main(int argc, char **argv)
             for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
             {
                 fread(invec, sizeof(float), 3, fd);
-                ICP[n].Pos[0] = invec[0]; ICP[n].Pos[1] = invec[1]; ICP[n].Pos[2] = invec[2];
+                ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0]; ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1]; ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
             }
             for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
                 fread(skip, sizeof(float), 3, fd);
@@ -274,9 +276,9 @@ int main(int argc, char **argv)
             for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
             {
                 fread(invec, sizeof(float), 3, fd);
-                ICP[n].Vel[0] = invec[0]*sqrt(All2.TimeIC);
-                ICP[n].Vel[1] = invec[1]*sqrt(All2.TimeIC);
-                ICP[n].Vel[2] = invec[2]*sqrt(All2.TimeIC);
+                ICP[n-ThisTask*NumPartTask].Vel[0] = invec[0]*sqrt(All2.TimeIC);
+                ICP[n-ThisTask*NumPartTask].Vel[1] = invec[1]*sqrt(All2.TimeIC);
+                ICP[n-ThisTask*NumPartTask].Vel[2] = invec[2]*sqrt(All2.TimeIC);
             }
             for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
                 fread(skip, sizeof(float), 3, fd);
