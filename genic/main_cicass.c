@@ -45,7 +45,7 @@ header1;
 
 int main(int argc, char **argv)
 {
-  int thread_provided, ThisTask;
+  int thread_provided, ThisTask, NumTask;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &thread_provided);
   if(thread_provided != MPI_THREAD_FUNNELED)
     message(1, "MPI_Init_thread returned %d != MPI_THREAD_FUNNELED\n", thread_provided);
@@ -55,8 +55,9 @@ int main(int argc, char **argv)
 
   tamalloc_init();
 
-    
-    MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+  MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+  MPI_Comm_size(MPI_COMM_WORLD, &NumTask);
+  printf("%i %i\n",ThisTask,NumTask);
 
   /* Genic Specific configuration structure*/
   struct genic_config All2 = {0};
@@ -69,8 +70,6 @@ int main(int argc, char **argv)
   mymalloc_init(MaxMemSizePerNode);
 
   init_endrun(ShowBacktrace);
-    
-
     
   // END OF CICASS SECTION
 
@@ -208,83 +207,94 @@ int main(int argc, char **argv)
     
     int NumPart = header1.npart[0];
     int NumPartSph = NumPart;
+    int NumPartTask = NumPart/NumTask;
     float skip[3];
     float invec[3];
     printf("%i %i\n",NumPart,NumPartSph);
     
-    if (ThisTask == 0) {
-        /* Pos */
-        fread(&dummy, sizeof(dummy), 1, fd);
-        //printf("dummy position read");
-        for(k = 0; k < 6; k++)
+    /* Pos */
+    fread(&dummy, sizeof(dummy), 1, fd);
+    //printf("dummy position read");
+    for(k = 0; k < 6; k++)
+    {
+        if(k == 0)
         {
-            if(k == 0)
+            for(n = 0; n < header1.npart[k]; n++)
             {
-                for(n = 0; n < header1.npart[k]; n++)
-                {
-                    fread(skip, sizeof(float), 3, fd);
-                }
-                //for (n=0; n<8; n++) {
-                //    printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
-                //}
+                fread(skip, sizeof(float), 3, fd);
             }
-            else if (k == 1)
-            {
-                for(n = 0; n < header1.npart[k]; n++)
-                {
-                    fread(invec, sizeof(float), 3, fd);
-                    ICP[n].Pos[0] = invec[0]; ICP[n].Pos[1] = invec[1]; ICP[n].Pos[2] = invec[2];
-                }
-                printf("Read gadget DM Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
-            }
-            else {
-                fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
-            }
+            //for (n=0; n<8; n++) {
+            //    printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
+            //}
         }
-        fread(&dummy2, sizeof(dummy2), 1, fd);
-        if(dummy2 != dummy)
+        else if (k == 1)
         {
-            printf("Pos: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
-            exit(1);
-        }
-        printf("Read gadget DM Pos done\n");
-        
-        /* Vel */
-        fread(&dummy, sizeof(dummy), 1, fd);
-        for(k = 0; k < 6; k++)
-        {
-            if(k == 0)
-            {
-                for(n = 0; n < header1.npart[k]; n++)
-                {
-                    fread(skip, sizeof(float), 3, fd);
-                }
-                //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
+            for (n = 0; n < ThisTask*NumPartTask; n++) {
+                fread(skip, sizeof(float), 3, fd);
             }
-            else if (k == 1)
+            for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
             {
-                for(n = 0; n < header1.npart[k]; n++)
-                {
-                    fread(invec, sizeof(float), 3, fd);
-                    ICP[n].Vel[0] = invec[0]*sqrt(All2.TimeIC);
-                    ICP[n].Vel[1] = invec[1]*sqrt(All2.TimeIC);
-                    ICP[n].Vel[2] = invec[2]*sqrt(All2.TimeIC);
-                }
-                printf("Read gadget DM Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
+                fread(invec, sizeof(float), 3, fd);
+                ICP[n].Pos[0] = invec[0]; ICP[n].Pos[1] = invec[1]; ICP[n].Pos[2] = invec[2];
             }
-            else
-            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
+                fread(skip, sizeof(float), 3, fd);
+            }
+            printf("Read gadget DM Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
         }
-        fread(&dummy2, sizeof(dummy2), 1, fd);
-        if(dummy2 != dummy)
-        {
-            printf("Vel: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
-            exit(1);
+        else {
+            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
         }
-        printf("Read gadget DM Vel done\n");
-        
-        fclose(fd);
     }
+    fread(&dummy2, sizeof(dummy2), 1, fd);
+    if(dummy2 != dummy)
+    {
+        printf("Pos: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
+        exit(1);
+    }
+    printf("Read gadget DM Pos done\n");
+    
+    /* Vel */
+    fread(&dummy, sizeof(dummy), 1, fd);
+    for(k = 0; k < 6; k++)
+    {
+        if(k == 0)
+        {
+            for(n = 0; n < header1.npart[k]; n++)
+            {
+                fread(skip, sizeof(float), 3, fd);
+            }
+            //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
+        }
+        else if (k == 1)
+        {
+            for (n = 0; n < ThisTask*NumPartTask; n++) {
+                fread(skip, sizeof(float), 3, fd);
+            }
+            for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
+            {
+                fread(invec, sizeof(float), 3, fd);
+                ICP[n].Vel[0] = invec[0]*sqrt(All2.TimeIC);
+                ICP[n].Vel[1] = invec[1]*sqrt(All2.TimeIC);
+                ICP[n].Vel[2] = invec[2]*sqrt(All2.TimeIC);
+            }
+            for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
+                fread(skip, sizeof(float), 3, fd);
+            }
+            printf("Read gadget DM Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
+        }
+        else
+        fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+    }
+    fread(&dummy2, sizeof(dummy2), 1, fd);
+    if(dummy2 != dummy)
+    {
+        printf("Vel: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
+        exit(1);
+    }
+    printf("Read gadget DM Vel done\n");
+    
+    fclose(fd);
 
   /*Write initial positions into ICP struct (for CDM and gas)*/
   //int j,k;
@@ -320,14 +330,14 @@ int main(int argc, char **argv)
         gsl_rng_free(g_rng);
         myfree(seedtable);
     }
-
+      
+    MPI_Barrier(MPI_COMM_WORLD);
     write_particle_data(idgen_cdm, 1, &bf, 0, All2.SavePrePos, All2.NumFiles, All2.NumWriters, ICP);
   }
 
   /*Now make the gas if required*/
   if(All2.ProduceGas) {
       
-      if (ThisTask == 0) {
           /* Pos */
           fread(&dummy, sizeof(dummy), 1, fd);
           //printf("dummy position read");
@@ -335,15 +345,18 @@ int main(int argc, char **argv)
           {
               if(k == 0)
               {
-                  for(n = 0; n < header1.npart[k]; n++)
+                  for (n = 0; n < ThisTask*NumPartTask; n++) {
+                      fread(skip, sizeof(float), 3, fd);
+                  }
+                  for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
                   {
                       fread(invec, sizeof(float), 3, fd);
                       ICP[n].Pos[0] = invec[0]; ICP[n].Pos[1] = invec[1]; ICP[n].Pos[2] = invec[2];
-                      printf("Read gadget gas Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
                   }
-                  //for (n=0; n<8; n++) {
-                  //    printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
-                  //}
+                  for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
+                      fread(skip, sizeof(float), 3, fd);
+                  }
+                  printf("Read gadget gas Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
               }
               else if (k == 1)
               {
@@ -371,13 +384,18 @@ int main(int argc, char **argv)
           {
               if(k == 0)
               {
-
-                  for(n = 0; n < header1.npart[k]; n++)
+                  for (n = 0; n < ThisTask*NumPartTask; n++) {
+                      fread(skip, sizeof(float), 3, fd);
+                  }
+                  for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
                   {
                       fread(invec, sizeof(float), 3, fd);
                       ICP[n].Vel[0] = invec[0]*sqrt(All2.TimeIC);
                       ICP[n].Vel[1] = invec[1]*sqrt(All2.TimeIC);
                       ICP[n].Vel[2] = invec[2]*sqrt(All2.TimeIC);
+                  }
+                  for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
+                      fread(skip, sizeof(float), 3, fd);
                   }
                   printf("Read gadget gas Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
                   //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
@@ -401,10 +419,11 @@ int main(int argc, char **argv)
           printf("Read gadget gas Vel done\n");
           
           fclose(fd);
-      }
       
     //displacement_fields(pm, GasType, ICP+NumPartCDM, NumPartGas, &CP, All2);
 
+      MPI_Barrier(MPI_COMM_WORLD);
+      
     write_particle_data(idgen_gas, 0, &bf, TotNumPart, All2.SavePrePos, All2.NumFiles, All2.NumWriters, ICP+NumPartCDM);
   }
   myfree(ICP);
