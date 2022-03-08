@@ -166,23 +166,23 @@ int main(int argc, char **argv)
   /* If we have incoherent glass files, we need to store both the particle tables
    * to ensure that there are no close particle pairs*/
   /*Make the table for the CDM*/
-//  if(!All2.MakeGlassCDM) {
-//      setup_grid(idgen_cdm, shift_dm, mass[1], ICP);
-//  } else {
-//      setup_glass(idgen_cdm, pm, 0, GLASS_SEED_HASH(All2.Seed), mass[1], ICP, All2.UnitLength_in_cm, All2.OutputDir);
-//  }
+  if(!All2.MakeGlassCDM) {
+      setup_grid(idgen_cdm, shift_dm, mass[1], ICP);
+  } else {
+      setup_glass(idgen_cdm, pm, 0, GLASS_SEED_HASH(All2.Seed), mass[1], ICP, All2.UnitLength_in_cm, All2.OutputDir);
+  }
 //
 //  /*Make the table for the baryons if we need, using the second half of the memory.*/
-//  if(All2.ProduceGas) {
-//    if(!All2.MakeGlassGas) {
-//        setup_grid(idgen_gas, shift_gas, mass[0], ICP+NumPartCDM);
-//    } else {
-//        setup_glass(idgen_gas, pm, 0, GLASS_SEED_HASH(All2.Seed + 1), mass[0], ICP+NumPartCDM, All2.UnitLength_in_cm, All2.OutputDir);
-//    }
-//    /*Do coherent glass evolution to avoid close pairs*/
-//    if(All2.MakeGlassGas || All2.MakeGlassCDM)
-//        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.UnitLength_in_cm, All2.OutputDir);
-//  }
+  if(All2.ProduceGas) {
+    if(!All2.MakeGlassGas) {
+        setup_grid(idgen_gas, shift_gas, mass[0], ICP+NumPartCDM);
+    } else {
+        setup_glass(idgen_gas, pm, 0, GLASS_SEED_HASH(All2.Seed + 1), mass[0], ICP+NumPartCDM, All2.UnitLength_in_cm, All2.OutputDir);
+    }
+    /*Do coherent glass evolution to avoid close pairs*/
+    if(All2.MakeGlassGas || All2.MakeGlassCDM)
+        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.UnitLength_in_cm, All2.OutputDir);
+  }
     
     
     // FBD HACK:
@@ -221,27 +221,31 @@ int main(int argc, char **argv)
     {
         if(k == 0)
         {
-            for(n = 0; n < header1.npart[k]; n++)
+            /*for(n = 0; n < header1.npart[k]; n++)
             {
                 fread(skip, sizeof(float), 3, fd);
-            }
+            }*/
+            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
             //for (n=0; n<8; n++) {
             //    printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
             //}
         }
         else if (k == 1)
         {
-            for (n = 0; n < ThisTask*NumPartTask; n++) {
+            /*for (n = 0; n < ThisTask*NumPartTask; n++) {
                 fread(skip, sizeof(float), 3, fd);
-            }
+            }*/
+            fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
             for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
             {
                 fread(invec, sizeof(float), 3, fd);
                 ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0]; ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1]; ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
             }
+            /*
             for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
                 fread(skip, sizeof(float), 3, fd);
-            }
+            }*/
+            fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
             printf("Read gadget DM Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
         }
         else {
@@ -262,17 +266,12 @@ int main(int argc, char **argv)
     {
         if(k == 0)
         {
-            for(n = 0; n < header1.npart[k]; n++)
-            {
-                fread(skip, sizeof(float), 3, fd);
-            }
+            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
             //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
         }
         else if (k == 1)
         {
-            for (n = 0; n < ThisTask*NumPartTask; n++) {
-                fread(skip, sizeof(float), 3, fd);
-            }
+            fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
             for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
             {
                 fread(invec, sizeof(float), 3, fd);
@@ -280,9 +279,7 @@ int main(int argc, char **argv)
                 ICP[n-ThisTask*NumPartTask].Vel[1] = invec[1]*sqrt(All2.TimeIC);
                 ICP[n-ThisTask*NumPartTask].Vel[2] = invec[2]*sqrt(All2.TimeIC);
             }
-            for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
-                fread(skip, sizeof(float), 3, fd);
-            }
+            fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
             printf("Read gadget DM Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
         }
         else
