@@ -344,7 +344,7 @@ void check_smoothing_length(double * MeanSpacing, const double BoxSize)
         if(P[i].Type != 5 && P[i].Type != 0)
             continue;
         if(P[i].Hsml > BoxSize || P[i].Hsml <= 0) {
-            P[i].Hsml = MeanSpacing[P[i].Type];
+            //P[i].Hsml = MeanSpacing[P[i].Type];
             numprob++;
             lastprob = i;
         }
