@@ -239,7 +239,9 @@ int main(int argc, char **argv)
             for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
             {
                 fread(invec, sizeof(float), 3, fd);
-                ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0]; ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1]; ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
+                ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0];
+                ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1];
+                ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
             }
             /*
             for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
@@ -359,26 +361,20 @@ int main(int argc, char **argv)
           {
               if(k == 0)
               {
-                  for (n = 0; n < ThisTask*NumPartTask; n++) {
-                      fread(skip, sizeof(float), 3, fd);
-                  }
+                  fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
                   for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
                   {
                       fread(invec, sizeof(float), 3, fd);
-                      ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0]; ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1]; ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
+                      ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0];
+                      ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1];
+                      ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
                   }
-                  for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
-                      fread(skip, sizeof(float), 3, fd);
-                  }
+                  fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
                   printf("Read gadget gas Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
               }
               else if (k == 1)
               {
-                  for(n = 0; n < header1.npart[k]; n++)
-                  {
-                      fread(skip, sizeof(float), 3, fd);
-                  }
-                  
+                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
               }
               else {
                   fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
@@ -398,9 +394,7 @@ int main(int argc, char **argv)
           {
               if(k == 0)
               {
-                  for (n = 0; n < ThisTask*NumPartTask; n++) {
-                      fread(skip, sizeof(float), 3, fd);
-                  }
+                  fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
                   for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
                   {
                       fread(invec, sizeof(float), 3, fd);
@@ -408,21 +402,17 @@ int main(int argc, char **argv)
                       ICP[n-ThisTask*NumPartTask].Vel[1] = invec[1]*sqrt(All2.TimeIC);
                       ICP[n-ThisTask*NumPartTask].Vel[2] = invec[2]*sqrt(All2.TimeIC);
                   }
-                  for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
-                      fread(skip, sizeof(float), 3, fd);
-                  }
+                  fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
                   printf("Read gadget gas Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
                   //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
               }
               else if (k == 1)
               {
-                  for(n = 0; n < header1.npart[k]; n++)
-                  {
-                      fread(skip, sizeof(float), 3, fd);
-                  }
+                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
               }
-              else
-              fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+              else {
+                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+              }
           }
           fread(&dummy2, sizeof(dummy2), 1, fd);
           if(dummy2 != dummy)
