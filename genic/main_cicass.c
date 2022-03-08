@@ -365,12 +365,12 @@ int main(int argc, char **argv)
                   for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
                   {
                       fread(invec, sizeof(float), 3, fd);
-                      ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0];
-                      ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1];
-                      ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Pos[0] = invec[0];
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Pos[1] = invec[1];
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Pos[2] = invec[2];
                   }
                   fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
-                  printf("Read gadget gas Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
+                  printf("Read gadget gas Pos %f %f %f\n",ICP[1+NumPartCDM].Pos[0],ICP[1+NumPartCDM].Pos[1],ICP[1+NumPartCDM].Pos[2]);
               }
               else if (k == 1)
               {
@@ -398,12 +398,12 @@ int main(int argc, char **argv)
                   for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
                   {
                       fread(invec, sizeof(float), 3, fd);
-                      ICP[n-ThisTask*NumPartTask].Vel[0] = invec[0]*sqrt(All2.TimeIC);
-                      ICP[n-ThisTask*NumPartTask].Vel[1] = invec[1]*sqrt(All2.TimeIC);
-                      ICP[n-ThisTask*NumPartTask].Vel[2] = invec[2]*sqrt(All2.TimeIC);
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Vel[0] = invec[0]*sqrt(All2.TimeIC);
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Vel[1] = invec[1]*sqrt(All2.TimeIC);
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Vel[2] = invec[2]*sqrt(All2.TimeIC);
                   }
                   fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
-                  printf("Read gadget gas Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
+                  printf("Read gadget gas Vel %f %f %f\n",ICP[1+NumPartCDM].Vel[0],ICP[1+NumPartCDM].Vel[1],ICP[1+NumPartCDM].Vel[2]);
                   //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
               }
               else if (k == 1)
