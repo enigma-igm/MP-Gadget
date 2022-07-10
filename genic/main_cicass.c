@@ -17,7 +17,7 @@
 
 #define GLASS_SEED_HASH(seed) ((seed) * 9999721L)
 
-static void print_spec(int ThisTask, const int Ngrid, struct genic_config All2, Cosmology * CP);
+//static void print_spec(int ThisTask, const int Ngrid, struct genic_config All2, Cosmology * CP);
 
 // Structure of CICASS IC binary output
 struct io_header_1
@@ -59,11 +59,13 @@ int main(int argc, char **argv)
   /* Genic Specific configuration structure*/
   struct genic_config All2 = {0};
 
-  Cosmology CP;
+  Cosmology CP ={0};
   int ShowBacktrace;
   double MaxMemSizePerNode;
   read_parameterfile(argv[1], &All2, &ShowBacktrace, &MaxMemSizePerNode, &CP);
-
+  All2.units = get_unitsystem(All2.units.UnitLength_in_cm,
+      All2.units.UnitMass_in_g, All2.units.UnitVelocity_in_cm_per_s);
+    
   mymalloc_init(MaxMemSizePerNode);
 
   init_endrun(ShowBacktrace);
@@ -180,7 +182,7 @@ int main(int argc, char **argv)
   int64_t TotNumPart = (int64_t) All2.Ngrid*All2.Ngrid*All2.Ngrid;
   int64_t TotNumPartGas = (int64_t) All2.ProduceGas*All2.NgridGas*All2.NgridGas*All2.NgridGas;
 
-  init_cosmology(&CP, All2.TimeIC);
+  init_cosmology(&CP, All2.TimeIC, All2.units);
 
   MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
   //init_powerspectrum(ThisTask, All2.TimeIC, All2.UnitLength_in_cm, &CP, &All2.PowerP);
@@ -219,7 +221,7 @@ int main(int argc, char **argv)
   struct thermalvel nu_therm;
   if(TotNu > 0) {
     const double kBMNu = 3*CP.ONu.kBtnu / (CP.MNu[0]+CP.MNu[1]+CP.MNu[2]);
-    double v_th = NU_V0(All2.TimeIC, kBMNu, All2.UnitVelocity_in_cm_per_s);
+    double v_th = NU_V0(All2.TimeIC, kBMNu, All2.units.UnitVelocity_in_cm_per_s);
     if(!All2.UsePeculiarVelocity)
         v_th /= sqrt(All2.TimeIC);
     total_nufrac = init_thermalvel(&nu_therm, v_th, All2.Max_nuvel/v_th, 0);
@@ -240,8 +242,8 @@ int main(int argc, char **argv)
   }
   PetaPM pm[1];
 
-  double UnitTime_in_s = All2.UnitLength_in_cm / All2.UnitVelocity_in_cm_per_s;
-  double Grav = GRAVITY / pow(All2.UnitLength_in_cm, 3) * All2.UnitMass_in_g * pow(UnitTime_in_s, 2);
+  double UnitTime_in_s = All2.units.UnitLength_in_cm / All2.units.UnitVelocity_in_cm_per_s;
+  double Grav = GRAVITY / pow(All2.units.UnitLength_in_cm, 3) * All2.units.UnitMass_in_g * pow(UnitTime_in_s, 2);
 
   petapm_init(pm, All2.BoxSize, 0, All2.Nmesh, Grav, MPI_COMM_WORLD);
 
@@ -303,7 +305,7 @@ int main(int argc, char **argv)
     /*Add a thermal velocity to WDM particles*/
     if(All2.WDM_therm_mass > 0){
         //int i;
-        double v_th = WDM_V0(All2.TimeIC, All2.WDM_therm_mass, CP.Omega0 - CP.OmegaBaryon - get_omega_nu(&CP.ONu, 1), CP.HubbleParam, All2.UnitVelocity_in_cm_per_s);
+        double v_th = WDM_V0(All2.TimeIC, All2.WDM_therm_mass, CP.Omega0 - CP.OmegaBaryon - get_omega_nu(&CP.ONu, 1), CP.HubbleParam, All2.units.UnitVelocity_in_cm_per_s);
         if(!All2.UsePeculiarVelocity)
            v_th /= sqrt(All2.TimeIC);
         struct thermalvel WDM;
@@ -397,36 +399,37 @@ int main(int argc, char **argv)
   return 0;
 }
 
-void print_spec(int ThisTask, const int Ngrid, struct genic_config All2, Cosmology * CP)
-{
-  if(ThisTask == 0)
-    {
-      double k, kstart, kend, DDD;
-      char buf[1000];
-      FILE *fd;
-
-      sprintf(buf, "%s/inputspec_%s.txt", All2.OutputDir, All2.InitCondFile);
-
-      fd = fopen(buf, "w");
-      if (fd == NULL) {
-        message(1, "Failed to create powerspec file at:%s\n", buf);
-        return;
-      }
-      DDD = GrowthFactor(CP, All2.TimeIC, 1.0);
-
-      fprintf(fd, "# %12g %12g\n", 1/All2.TimeIC-1, DDD);
-      /* print actual starting redshift and linear growth factor for this cosmology */
-      kstart = 2 * M_PI / (2*All2.BoxSize * (CM_PER_MPC / All2.UnitLength_in_cm));	/* 2x box size Mpc/h */
-      kend = 2 * M_PI / (All2.BoxSize/(8*Ngrid) * (CM_PER_MPC / All2.UnitLength_in_cm));	/* 1/8 mean spacing Mpc/h */
-
-      message(1,"kstart=%lg kend=%lg\n",kstart,kend);
-
-      for(k = kstart; k < kend; k *= 1.025)
-	  {
-	    double po = pow(DeltaSpec(k, DELTA_TOT),2);
-	    fprintf(fd, "%12g %12g\n", k, po);
-	  }
-      fclose(fd);
-    }
-}
-
+//
+//void print_spec(int ThisTask, const int Ngrid, struct genic_config All2, Cosmology * CP)
+//{
+//  if(ThisTask == 0)
+//    {
+//      double k, kstart, kend, DDD;
+//      char buf[1000];
+//      FILE *fd;
+//
+//      sprintf(buf, "%s/inputspec_%s.txt", All2.OutputDir, All2.InitCondFile);
+//
+//      fd = fopen(buf, "w");
+//      if (fd == NULL) {
+//        message(1, "Failed to create powerspec file at:%s\n", buf);
+//        return;
+//      }
+//      DDD = GrowthFactor(CP, All2.TimeIC, 1.0);
+//
+//      fprintf(fd, "# %12g %12g\n", 1/All2.TimeIC-1, DDD);
+//      /* print actual starting redshift and linear growth factor for this cosmology */
+//      kstart = 2 * M_PI / (2*All2.BoxSize * (CM_PER_MPC / All2.UnitLength_in_cm));	/* 2x box size Mpc/h */
+//      kend = 2 * M_PI / (All2.BoxSize/(8*Ngrid) * (CM_PER_MPC / All2.UnitLength_in_cm));	/* 1/8 mean spacing Mpc/h */
+//
+//      message(1,"kstart=%lg kend=%lg\n",kstart,kend);
+//
+//      for(k = kstart; k < kend; k *= 1.025)
+//	  {
+//	    double po = pow(DeltaSpec(k, DELTA_TOT),2);
+//	    fprintf(fd, "%12g %12g\n", k, po);
+//	  }
+//      fclose(fd);
+//    }
+//}
+//
