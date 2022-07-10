@@ -446,11 +446,11 @@ metal_return_init(const ActiveParticles * act, Cosmology * CP, struct MetalRetur
 
     /* Initialize*/
     setup_metal_table_interp(&priv->interp);
-    priv->StellarAges = mymalloc("StellarAges", SlotsManager->info[4].size * sizeof(MyFloat));
-    priv->MassReturn = mymalloc("MassReturn", SlotsManager->info[4].size * sizeof(MyFloat));
-    priv->LowDyingMass = mymalloc("LowDyingMass", SlotsManager->info[4].size * sizeof(MyFloat));
-    priv->HighDyingMass = mymalloc("HighDyingMass", SlotsManager->info[4].size * sizeof(MyFloat));
-    priv->StarVolumeSPH = mymalloc("StarVolumeSPH", SlotsManager->info[4].size * sizeof(MyFloat));
+    priv->StellarAges = (MyFloat *) mymalloc("StellarAges", SlotsManager->info[4].size * sizeof(MyFloat));
+    priv->MassReturn = (MyFloat *) mymalloc("MassReturn", SlotsManager->info[4].size * sizeof(MyFloat));
+    priv->LowDyingMass = (MyFloat *) mymalloc("LowDyingMass", SlotsManager->info[4].size * sizeof(MyFloat));
+    priv->HighDyingMass = (MyFloat *) mymalloc("HighDyingMass", SlotsManager->info[4].size * sizeof(MyFloat));
+    priv->StarVolumeSPH = (MyFloat *) mymalloc("StarVolumeSPH", SlotsManager->info[4].size * sizeof(MyFloat));
 
     priv->imf_norm = compute_imf_norm(priv->gsl_work[0]);
     /* Maximum possible mass return for below*/
@@ -514,7 +514,7 @@ metal_return_priv_free(struct MetalReturnPriv * priv)
 
 /*! This function is the driver routine for the calculation of metal return. */
 void
-metal_return(const ActiveParticles * act, DomainDecomp * const ddecomp, Cosmology * CP, const double atime, const double BoxSize, const double AvgGasMass)
+metal_return(const ActiveParticles * act, DomainDecomp * const ddecomp, Cosmology * CP, const double atime, const double AvgGasMass)
 {
     /* Do nothing if no stars yet*/
     int64_t totstar;
@@ -535,6 +535,8 @@ metal_return(const ActiveParticles * act, DomainDecomp * const ddecomp, Cosmolog
     int64_t totwork;
     MPI_Allreduce(&nwork, &totwork, 1, MPI_INT64, MPI_SUM, MPI_COMM_WORLD);
 
+    walltime_measure("/SPH/Metals/Init");
+
     if(totwork == 0) {
         metal_return_priv_free(priv);
         return;
@@ -542,7 +544,7 @@ metal_return(const ActiveParticles * act, DomainDecomp * const ddecomp, Cosmolog
 
     ForceTree gasTree = {0};
     /* Just gas, no moments*/
-    force_tree_rebuild_mask(&gasTree, ddecomp, GASMASK, BoxSize, 0, NULL);
+    force_tree_rebuild_mask(&gasTree, ddecomp, GASMASK, 0, NULL);
 
     /* Compute total number of weights around each star for actively returning stars*/
     stellar_density(act, priv->StarVolumeSPH, priv->MassReturn, &gasTree);
@@ -962,8 +964,6 @@ stellar_density(const ActiveParticles * act, MyFloat * StarVolumeSPH, MyFloat * 
         priv->Right[pi] = tree->BoxSize;
     }
 
-    walltime_measure("/SPH/Metals/Init");
-
     /* allocate buffers to arrange communication */
 
     treewalk_do_hsml_loop(tw, act->ActiveParticle, act->NumActiveParticle, 1);
@@ -977,8 +977,8 @@ stellar_density(const ActiveParticles * act, MyFloat * StarVolumeSPH, MyFloat * 
             continue;
         /* Copy the Star Volume SPH*/
         StarVolumeSPH[P[a].PI] = priv->VolumeSPH[P[a].PI][0];
-        if(priv->VolumeSPH[P[a].PI] == 0)
-            endrun(3, "i = %d pi = %d StarVolumeSPH %g hsml %g\n", a, P[a].PI, priv->VolumeSPH[P[a].PI], P[a].Hsml);
+        if(priv->VolumeSPH[P[a].PI][0] == 0)
+            endrun(3, "i = %d pi = %d StarVolumeSPH %g hsml %g\n", a, P[a].PI, priv->VolumeSPH[P[a].PI][0], P[a].Hsml);
     }
 
     myfree(priv->maxcmpte);

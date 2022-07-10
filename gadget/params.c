@@ -17,13 +17,15 @@
 #include <libgadget/hydra.h>
 #include <libgadget/fof.h>
 #include <libgadget/init.h>
+#include <libgadget/run.h>
 #include <libgadget/timebinmgr.h>
 #include <libgadget/petaio.h>
 #include <libgadget/cooling_qso_lightup.h>
 #include <libgadget/metal_return.h>
+#include <libgadget/stats.h>
 
 static int
-BlackHoleFeedbackMethodAction (ParameterSet * ps, char * name, void * data)
+BlackHoleFeedbackMethodAction (ParameterSet * ps, const char * name, void * data)
 {
     int v = param_get_enum(ps, name);
     if(HAS(v, BH_FEEDBACK_TOPHAT) == HAS(v, BH_FEEDBACK_SPLINE)) {
@@ -38,7 +40,7 @@ BlackHoleFeedbackMethodAction (ParameterSet * ps, char * name, void * data)
 }
 
 static int
-StarformationCriterionAction(ParameterSet * ps, char * name, void * data)
+StarformationCriterionAction(ParameterSet * ps, const char * name, void * data)
 {
     int v = param_get_enum(ps, name);
     if(!HAS(v, SFR_CRITERION_DENSITY)) {
@@ -214,10 +216,19 @@ create_gadget_parameter_set()
 
     param_declare_double(ps, "BlackHoleNgbFactor", OPTIONAL, 2, "Factor by which to increase the number of neighbours for a black hole.");
 
-    param_declare_double(ps, "BlackHoleMaxAccretionRadius", OPTIONAL, 99999., "Maximum neighbour search radius for black holes. Rarely needed.");
+    param_declare_double(ps, "BlackHoleMaxAccretionRadius", OPTIONAL, 99999., "NO EFFECT. Was maximum search radius for black holes.");
     param_declare_double(ps, "BlackHoleFeedbackFactor", OPTIONAL, 0.05, " Fraction of the black hole luminosity to turn into thermal energy");
-    param_declare_double(ps, "BlackHoleFeedbackRadius", OPTIONAL, 0, "If set, the comoving radius at which the black hole feedback energy is deposited.");
+    param_declare_double(ps, "BlackHoleFeedbackRadius", OPTIONAL, 0, "NO EFFECT. Was the comoving radius at which the black hole feedback energy was deposited. Did not affect accretion so had odd behaviour.");
     param_declare_int(ps, "BlackHoleRepositionEnabled", OPTIONAL, 1, "Enables Black hole repositioning to the potential minimum.");
+    
+    param_declare_int(ps, "BlackHoleKineticOn", OPTIONAL, 0, "Switch to AGN kinetic feedback when Eddington accretion is low.");
+    param_declare_double(ps,"BHKE_EddingtonThrFactor",OPTIONAL, 0.05, "Threshold of the Eddington rate for the kinetic feedback");
+    param_declare_double(ps,"BHKE_EddingtonMFactor",OPTIONAL, 0.002, "Factor for mbh-dependent Eddington threshold for the kinetic feedback");
+    param_declare_double(ps,"BHKE_EddingtonMPivot",OPTIONAL, 0.05, "Pivot MBH for mbh-dependent Eddington threshold for the kinetic feedback");
+    param_declare_double(ps,"BHKE_EddingtonMIndex",OPTIONAL, 2, "Powlaw index for mbh-dependent Eddington threshold for the kinetic feedback");
+    param_declare_double(ps,"BHKE_EffRhoFactor",OPTIONAL, 0.05, "Factor1 for kinetic feedback efficiency, compare with BH density");
+    param_declare_double(ps,"BHKE_EffCap",OPTIONAL, 0.05, "Factor2 for kinetic feedback efficiency, sets the maximum factor that converts accretion energy to kinetic feedback");
+    param_declare_double(ps,"BHKE_InjEnergyThr",OPTIONAL, 5, "Factor for Minimum KineticFeedbackEnergy injection, controls the burstiness of kinetic feedback");
 
     param_declare_double(ps, "BlackHoleFeedbackRadiusMaxPhys", OPTIONAL, 0, "If set, the physical radius at which the black hole feedback energy is deposited. When both this flag and BlackHoleFeedbackRadius are both set, the smaller radius is used.");
     param_declare_int(ps,"WriteBlackHoleDetails",OPTIONAL, 0, "If set, output BH details at every time step.");
@@ -356,12 +367,11 @@ void read_parameter_file(char *fname, int * ShowBacktrace, double * MaxMemSizePe
     int ThisTask;
     MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
 
-    char * error;
-    if(0 != param_parse_file(ps, fname, &error)) {
-        endrun(1, "Parsing %s failed: %s\n", fname, error);
+    if(0 != param_parse_file(ps, fname)) {
+        endrun(1, "Parsing %s failed.\n", fname);
     }
-    if(0 != param_validate(ps, &error)) {
-        endrun(1, "Validation of %s failed: %s\n", fname, error);
+    if(0 != param_validate(ps)) {
+        endrun(1, "Validation of %s failed: %s\n", fname);
     }
 
     message(0, "----------- Running with Parameters ----------\n");
@@ -376,6 +386,7 @@ void read_parameter_file(char *fname, int * ShowBacktrace, double * MaxMemSizePe
     }
 
     /*Initialize per-module parameters.*/
+    set_all_global_params(ps);
     set_init_params(ps);
     set_petaio_params(ps);
     set_timestep_params(ps);
@@ -391,6 +402,6 @@ void read_parameter_file(char *fname, int * ShowBacktrace, double * MaxMemSizePe
     set_fof_params(ps);
     set_blackhole_params(ps);
     set_metal_return_params(ps);
-
+    set_stats_params(ps);
     parameter_set_free(ps);
 }
