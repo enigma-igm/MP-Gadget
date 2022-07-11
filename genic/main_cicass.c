@@ -171,7 +171,7 @@ int main(int argc, char **argv)
   if(!All2.MakeGlassCDM) {
       setup_grid(idgen_cdm, shift_dm, mass[1], ICP);
   } else {
-      setup_glass(idgen_cdm, pm, 0, GLASS_SEED_HASH(All2.Seed), mass[1], ICP, All2.UnitLength_in_cm, All2.OutputDir);
+      setup_glass(idgen_cdm, pm, 0, GLASS_SEED_HASH(All2.Seed), mass[1], ICP, All2.units.UnitLength_in_cm, All2.OutputDir);
   }
 //
 //  /*Make the table for the baryons if we need, using the second half of the memory.*/
@@ -179,11 +179,11 @@ int main(int argc, char **argv)
     if(!All2.MakeGlassGas) {
         setup_grid(idgen_gas, shift_gas, mass[0], ICP+NumPartCDM);
     } else {
-        setup_glass(idgen_gas, pm, 0, GLASS_SEED_HASH(All2.Seed + 1), mass[0], ICP+NumPartCDM, All2.UnitLength_in_cm, All2.OutputDir);
+        setup_glass(idgen_gas, pm, 0, GLASS_SEED_HASH(All2.Seed + 1), mass[0], ICP+NumPartCDM, All2.units.UnitLength_in_cm, All2.OutputDir);
     }
     /*Do coherent glass evolution to avoid close pairs*/
     if(All2.MakeGlassGas || All2.MakeGlassCDM)
-        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.UnitLength_in_cm, All2.OutputDir);
+        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.units.UnitLength_in_cm, All2.OutputDir);
   }
     
     
