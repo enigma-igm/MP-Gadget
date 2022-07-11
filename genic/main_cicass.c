@@ -45,7 +45,7 @@ header1;
 
 int main(int argc, char **argv)
 {
-  int thread_provided, ThisTask;
+  int thread_provided, ThisTask, NumTask;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &thread_provided);
   if(thread_provided != MPI_THREAD_FUNNELED)
     message(1, "MPI_Init_thread returned %d != MPI_THREAD_FUNNELED\n", thread_provided);
@@ -55,6 +55,9 @@ int main(int argc, char **argv)
 
   tamalloc_init();
 
+  MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+  MPI_Comm_size(MPI_COMM_WORLD, &NumTask);
+  printf("%i %i\n",ThisTask,NumTask);
 
   /* Genic Specific configuration structure*/
   struct genic_config All2 = {0};
@@ -70,110 +73,6 @@ int main(int argc, char **argv)
 
   init_endrun(ShowBacktrace);
     
-  // FBD HACK:
-  // READ IN GADGET FORMAT CICASS OUTPUT HERE.
-  // CODE COPIED FROM VOLKER'S io_input.c: load_snapshot_gas
-  FILE *fd;
-  char *fname = All2.PowerP.FileWithInputSpectrum;//"/mnt/quasar/fdavies/cdm_1Mpc_128_v30_IC.dat"; // CICASS IC filename
-  int i, j, k, dummy, dummy2;
-  int n;
-  
-  if(!(fd = fopen(fname, "r")))
-  {
-      printf("can't open file `%s`\n", fname);
-      exit(1);
-  }
-  
-  printf("reading `%s' ...\n", fname);
-  fflush(stdout);
-  
-  fread(&dummy, sizeof(dummy), 1, fd);
-  fread(&header1, sizeof(header1), 1, fd);
-  fread(&dummy, sizeof(dummy), 1, fd);
-  
-  int NumPart = header1.npart[0];
-  int NumPartSph = NumPart;
-  printf("%i %i\n",NumPart,NumPartSph);
-  
-  float **dm_pos = (float**)malloc((size_t)NumPart*sizeof(float*));
-  float **dm_vel = (float**)malloc((size_t)NumPart*sizeof(float*));
-  float **gas_pos = (float**)malloc((size_t)NumPartSph*sizeof(float*));
-  float **gas_vel = (float**)malloc((size_t)NumPartSph*sizeof(float*));
-  for (i=0; i<NumPart; i++) {
-      dm_pos[i] = (float*)malloc((size_t)3*sizeof(float));
-      dm_vel[i] = (float*)malloc((size_t)3*sizeof(float));
-      gas_pos[i] = (float*)malloc((size_t)3*sizeof(float));
-      gas_vel[i] = (float*)malloc((size_t)3*sizeof(float));
-  }
-  
-  /* Pos */
-  fread(&dummy, sizeof(dummy), 1, fd);
-  //printf("dummy position read");
-  for(k = 0; k < 6; k++)
-  {
-      if(k == 0)
-      {
-          for(n = 0; n < header1.npart[k]; n++)
-          {
-              fread(gas_pos[n], sizeof(float), 3, fd);
-          }
-          for (n=0; n<8; n++) {
-          printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
-          }
-      }
-      else if (k == 1)
-      {
-          for(n = 0; n < header1.npart[k]; n++)
-          {
-              fread(dm_pos[n], sizeof(float), 3, fd);
-          }
-          printf("Read gadget Pos2 %f %f %f\n",dm_pos[1][0],dm_pos[1][1],dm_pos[1][2]);
-      }
-      else {
-          fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
-      }
-  }
-  fread(&dummy2, sizeof(dummy2), 1, fd);
-  if(dummy2 != dummy)
-  {
-      printf("Pos: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
-      exit(1);
-  }
-  printf("Read gadget Pos done\n");
-  
-  /* Vel */
-  fread(&dummy, sizeof(dummy), 1, fd);
-  for(k = 0; k < 6; k++)
-  {
-      if(k == 0)
-      {
-          for(n = 0; n < header1.npart[k]; n++)
-          {
-              fread(gas_vel[n], sizeof(float), 3, fd);
-          }
-          printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
-      }
-      else if (k == 1)
-      {
-          for(n = 0; n < header1.npart[k]; n++)
-          {
-              fread(dm_vel[n], sizeof(float), 3, fd);
-          }
-          printf("Read gadget Vel2 %f %f %f\n",dm_vel[1][0],dm_vel[1][1],dm_vel[1][2]);
-      }
-      else
-          fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
-  }
-  fread(&dummy2, sizeof(dummy2), 1, fd);
-  if(dummy2 != dummy)
-  {
-      printf("Vel: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
-      exit(1);
-  }
-  printf("Read gadget Vel done\n");
-  
-  fclose(fd);
-    
   // END OF CICASS SECTION
 
   struct ClockTable Clocks;
@@ -184,7 +83,7 @@ int main(int argc, char **argv)
 
   init_cosmology(&CP, All2.TimeIC, All2.units);
 
-  MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
+  //MPI_Comm_rank(MPI_COMM_WORLD, &ThisTask);
   //init_powerspectrum(ThisTask, All2.TimeIC, All2.UnitLength_in_cm, &CP, &All2.PowerP);
 
   petapm_module_init(omp_get_max_threads());
@@ -260,6 +159,8 @@ int main(int argc, char **argv)
 
   int NumPartCDM = idgen_cdm->NumPart;
   int NumPartGas = idgen_gas->NumPart;
+    
+    printf("from igden: %i %i\n",NumPartCDM,NumPartGas);
 
   /*Space for both CDM and baryons*/
   struct ic_part_data * ICP = (struct ic_part_data *) mymalloc("PartTable", (NumPartCDM + All2.ProduceGas * NumPartGas)*sizeof(struct ic_part_data));
@@ -267,31 +168,136 @@ int main(int argc, char **argv)
   /* If we have incoherent glass files, we need to store both the particle tables
    * to ensure that there are no close particle pairs*/
   /*Make the table for the CDM*/
-//  if(!All2.MakeGlassCDM) {
-//      setup_grid(idgen_cdm, shift_dm, mass[1], ICP);
-//  } else {
-//      setup_glass(idgen_cdm, pm, 0, GLASS_SEED_HASH(All2.Seed), mass[1], ICP, All2.UnitLength_in_cm, All2.OutputDir);
-//  }
+  if(!All2.MakeGlassCDM) {
+      setup_grid(idgen_cdm, shift_dm, mass[1], ICP);
+  } else {
+      setup_glass(idgen_cdm, pm, 0, GLASS_SEED_HASH(All2.Seed), mass[1], ICP, All2.UnitLength_in_cm, All2.OutputDir);
+  }
 //
 //  /*Make the table for the baryons if we need, using the second half of the memory.*/
-//  if(All2.ProduceGas) {
-//    if(!All2.MakeGlassGas) {
-//        setup_grid(idgen_gas, shift_gas, mass[0], ICP+NumPartCDM);
-//    } else {
-//        setup_glass(idgen_gas, pm, 0, GLASS_SEED_HASH(All2.Seed + 1), mass[0], ICP+NumPartCDM, All2.UnitLength_in_cm, All2.OutputDir);
-//    }
-//    /*Do coherent glass evolution to avoid close pairs*/
-//    if(All2.MakeGlassGas || All2.MakeGlassCDM)
-//        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.UnitLength_in_cm, All2.OutputDir);
-//  }
-    
-  // ASSIGN CICASS QUANTITIES TO DM PARTICLES
-  for (i = 0; i < NumPartCDM; i++) {
-      for (j = 0; j < 3; j++) {
-          ICP[i].Pos[j] = dm_pos[i][j];
-          ICP[i].Vel[j] = dm_vel[i][j]*sqrt(All2.TimeIC);
-      }
+  if(All2.ProduceGas) {
+    if(!All2.MakeGlassGas) {
+        setup_grid(idgen_gas, shift_gas, mass[0], ICP+NumPartCDM);
+    } else {
+        setup_glass(idgen_gas, pm, 0, GLASS_SEED_HASH(All2.Seed + 1), mass[0], ICP+NumPartCDM, All2.UnitLength_in_cm, All2.OutputDir);
+    }
+    /*Do coherent glass evolution to avoid close pairs*/
+    if(All2.MakeGlassGas || All2.MakeGlassCDM)
+        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.UnitLength_in_cm, All2.OutputDir);
   }
+    
+    
+    // FBD HACK:
+    // READ IN GADGET FORMAT CICASS OUTPUT HERE.
+    // CODE COPIED FROM VOLKER'S io_input.c: load_snapshot_gas
+    FILE *fd;
+    char *fname = All2.PowerP.FileWithInputSpectrum;//"/mnt/quasar/fdavies/cdm_1Mpc_128_v30_IC.dat"; // CICASS IC filename
+    int i, j, k, dummy, dummy2;
+    int n;
+    // only read in the file on the primary task
+    
+    if(!(fd = fopen(fname, "r")))
+    {
+        printf("can't open file `%s`\n", fname);
+        exit(1);
+    }
+    
+    printf("reading `%s' ...\n", fname);
+    fflush(stdout);
+    
+    fread(&dummy, sizeof(dummy), 1, fd);
+    fread(&header1, sizeof(header1), 1, fd);
+    fread(&dummy, sizeof(dummy), 1, fd);
+    
+    int NumPart = header1.npart[0];
+    int NumPartSph = NumPart;
+    int NumPartTask = NumPart/NumTask;
+    float skip[3];
+    float invec[3];
+    printf("%i %i\n",NumPart,NumPartSph);
+    
+    /* Pos */
+    fread(&dummy, sizeof(dummy), 1, fd);
+    //printf("dummy position read");
+    for(k = 0; k < 6; k++)
+    {
+        if(k == 0)
+        {
+            /*for(n = 0; n < header1.npart[k]; n++)
+            {
+                fread(skip, sizeof(float), 3, fd);
+            }*/
+            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            //for (n=0; n<8; n++) {
+            //    printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
+            //}
+        }
+        else if (k == 1)
+        {
+            /*for (n = 0; n < ThisTask*NumPartTask; n++) {
+                fread(skip, sizeof(float), 3, fd);
+            }*/
+            fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
+            for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
+            {
+                fread(invec, sizeof(float), 3, fd);
+                ICP[n-ThisTask*NumPartTask].Pos[0] = invec[0];
+                ICP[n-ThisTask*NumPartTask].Pos[1] = invec[1];
+                ICP[n-ThisTask*NumPartTask].Pos[2] = invec[2];
+            }
+            /*
+            for (n = (ThisTask+1)*NumPartTask; n < NumPart; n++) {
+                fread(skip, sizeof(float), 3, fd);
+            }*/
+            fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
+            printf("Read gadget DM Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
+        }
+        else {
+            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+        }
+    }
+    fread(&dummy2, sizeof(dummy2), 1, fd);
+    if(dummy2 != dummy)
+    {
+        printf("Pos: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
+        exit(1);
+    }
+    printf("Read gadget DM Pos done\n");
+    
+    /* Vel */
+    fread(&dummy, sizeof(dummy), 1, fd);
+    for(k = 0; k < 6; k++)
+    {
+        if(k == 0)
+        {
+            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
+        }
+        else if (k == 1)
+        {
+            fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
+            for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
+            {
+                fread(invec, sizeof(float), 3, fd);
+                ICP[n-ThisTask*NumPartTask].Vel[0] = invec[0]*sqrt(All2.TimeIC);
+                ICP[n-ThisTask*NumPartTask].Vel[1] = invec[1]*sqrt(All2.TimeIC);
+                ICP[n-ThisTask*NumPartTask].Vel[2] = invec[2]*sqrt(All2.TimeIC);
+            }
+            fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
+            printf("Read gadget DM Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
+        }
+        else
+        fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+    }
+    fread(&dummy2, sizeof(dummy2), 1, fd);
+    if(dummy2 != dummy)
+    {
+        printf("Vel: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
+        exit(1);
+    }
+    printf("Read gadget DM Vel done\n");
+    
+    fclose(fd);
 
   /*Write initial positions into ICP struct (for CDM and gas)*/
   //int j,k;
@@ -327,21 +333,102 @@ int main(int argc, char **argv)
         gsl_rng_free(g_rng);
         myfree(seedtable);
     }
-
+      
+    MPI_Barrier(MPI_COMM_WORLD);
     write_particle_data(idgen_cdm, 1, &bf, 0, All2.SavePrePos, All2.NumFiles, All2.NumWriters, ICP);
   }
 
   /*Now make the gas if required*/
   if(All2.ProduceGas) {
-    //displacement_fields(pm, GasType, ICP+NumPartCDM, NumPartGas, &CP, All2);
       
-      // ASSIGN CICASS QUANTITIES TO GAS
-      for (i = NumPartCDM; i < NumPartCDM+NumPartGas; i++) {
-          for (j = 0; j < 3; j++) {
-              ICP[i].Pos[j] = gas_pos[i-NumPartCDM][j];
-              ICP[i].Vel[j] = gas_vel[i-NumPartCDM][j]*sqrt(All2.TimeIC);
-          }
+      // Re-open the file
+      if(!(fd = fopen(fname, "r")))
+      {
+          printf("can't open file `%s`\n", fname);
+          exit(1);
       }
+      
+      printf("reading `%s' ...\n", fname);
+      fflush(stdout);
+      
+      fread(&dummy, sizeof(dummy), 1, fd);
+      fread(&header1, sizeof(header1), 1, fd);
+      fread(&dummy, sizeof(dummy), 1, fd);
+      
+      
+          /* Pos */
+          fread(&dummy, sizeof(dummy), 1, fd);
+          //printf("dummy position read");
+          for(k = 0; k < 6; k++)
+          {
+              if(k == 0)
+              {
+                  fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
+                  for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
+                  {
+                      fread(invec, sizeof(float), 3, fd);
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Pos[0] = invec[0];
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Pos[1] = invec[1];
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Pos[2] = invec[2];
+                  }
+                  fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
+                  printf("Read gadget gas Pos %f %f %f\n",ICP[1+NumPartCDM].Pos[0],ICP[1+NumPartCDM].Pos[1],ICP[1+NumPartCDM].Pos[2]);
+              }
+              else if (k == 1)
+              {
+                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+              }
+              else {
+                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+              }
+          }
+          fread(&dummy2, sizeof(dummy2), 1, fd);
+          if(dummy2 != dummy)
+          {
+              printf("Pos: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
+              exit(1);
+          }
+          printf("Read gadget gas Pos done\n");
+          
+          /* Vel */
+          fread(&dummy, sizeof(dummy), 1, fd);
+          for(k = 0; k < 6; k++)
+          {
+              if(k == 0)
+              {
+                  fseek(fd, ThisTask*NumPartTask * sizeof(float) * 3, SEEK_CUR);
+                  for(n = ThisTask*NumPartTask; n < (ThisTask+1)*NumPartTask; n++)
+                  {
+                      fread(invec, sizeof(float), 3, fd);
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Vel[0] = invec[0]*sqrt(All2.TimeIC);
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Vel[1] = invec[1]*sqrt(All2.TimeIC);
+                      ICP[n+NumPartCDM-ThisTask*NumPartTask].Vel[2] = invec[2]*sqrt(All2.TimeIC);
+                  }
+                  fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
+                  printf("Read gadget gas Vel %f %f %f\n",ICP[1+NumPartCDM].Vel[0],ICP[1+NumPartCDM].Vel[1],ICP[1+NumPartCDM].Vel[2]);
+                  //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
+              }
+              else if (k == 1)
+              {
+                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+              }
+              else {
+                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+              }
+          }
+          fread(&dummy2, sizeof(dummy2), 1, fd);
+          if(dummy2 != dummy)
+          {
+              printf("Vel: I/O Panic! dummy=%d dumy2=%d\n",dummy,dummy2);
+              exit(1);
+          }
+          printf("Read gadget gas Vel done\n");
+          
+          fclose(fd);
+      
+    //displacement_fields(pm, GasType, ICP+NumPartCDM, NumPartGas, &CP, All2);
+
+      MPI_Barrier(MPI_COMM_WORLD);
       
     write_particle_data(idgen_gas, 0, &bf, TotNumPart, All2.SavePrePos, All2.NumFiles, All2.NumWriters, ICP+NumPartCDM);
   }
