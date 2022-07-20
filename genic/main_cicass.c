@@ -242,7 +242,7 @@ int main(int argc, char **argv)
     long NumPartTask = NumPart/NumTask;
     float skip[3];
     float invec[3];
-    printf("%i %i\n",NumPart,NumPartSph);
+    printf("%li %li\n",NumPart,NumPartSph);
     
     /* Pos */
     fread(&dummy, sizeof(dummy), 1, fd);
