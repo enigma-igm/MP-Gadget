@@ -43,6 +43,30 @@ struct io_header_1
 }
 header1;
 
+// CICASS IC binary output for extremely large runs
+struct io_header_2
+{
+    long npart[6];      /*!< npart[1] gives the number of particles in the present file, other particle types are ignored */
+    double mass[6];          /*!< mass[1] gives the particle mass */
+    double time;             /*!< time (=cosmological scale factor) of snapshot */
+    double redshift;         /*!< redshift of snapshot */
+    int flag_sfr;       /*!< flags whether star formation is used (not available in L-Gadget2) */
+    int flag_feedback;  /*!< flags whether feedback from star formation is included */
+    unsigned int npartTotal[6]; /*!< npart[1] gives the total number of particles in the run. If this number exceeds 2^32, the npartTotal[2] stores
+                                 the result of a division of the particle number by 2^32, while npartTotal[1] holds the remainder. */
+    int flag_cooling;   /*!< flags whether radiative cooling is included */
+    int num_files;      /*!< determines the number of files that are used for a snapshot */
+    double BoxSize;          /*!< Simulation box size (in code units) */
+    double Omega0;           /*!< matter density */
+    double OmegaLambda;      /*!< vacuum energy density */
+    double HubbleParam;      /*!< little 'h' */
+    int flag_stellarage;     /*!< flags whether the age of newly formed stars is recorded and saved */
+    int flag_metals;         /*!< flags whether metal enrichment is included */
+    int hashtabsize;         /*!< gives the size of the hashtable belonging to this snapshot file */
+    char fill[84];        /*!< fills to 256 Bytes */
+}
+header2;
+
 int main(int argc, char **argv)
 {
   int thread_provided, ThisTask, NumTask;
@@ -183,7 +207,7 @@ int main(int argc, char **argv)
     }
     /*Do coherent glass evolution to avoid close pairs*/
     if(All2.MakeGlassGas || All2.MakeGlassCDM)
-        glass_evolve(pm, 14, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.units.UnitLength_in_cm, All2.OutputDir);
+        glass_evolve(pm, 1, "powerspectrum-glass-tot", ICP, NumPartCDM+NumPartGas, All2.units.UnitLength_in_cm, All2.OutputDir);
   }
     
     
@@ -206,12 +230,16 @@ int main(int argc, char **argv)
     fflush(stdout);
     
     fread(&dummy, sizeof(dummy), 1, fd);
-    fread(&header1, sizeof(header1), 1, fd);
+    if (All2.Ngrid < 1500) {
+        fread(&header1, sizeof(header1), 1, fd);
+    } else { // For huge grids, switch to custom format with bigger integers
+        fread(&header2, sizeof(header2), 1, fd);
+    }
     fread(&dummy, sizeof(dummy), 1, fd);
     
-    int NumPart = header1.npart[0];
-    int NumPartSph = NumPart;
-    int NumPartTask = NumPart/NumTask;
+    long NumPart = header1.npart[0];
+    long NumPartSph = NumPart;
+    long NumPartTask = NumPart/NumTask;
     float skip[3];
     float invec[3];
     printf("%i %i\n",NumPart,NumPartSph);
