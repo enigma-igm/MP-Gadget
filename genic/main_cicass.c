@@ -217,7 +217,7 @@ int main(int argc, char **argv)
     FILE *fd;
     char *fname = All2.PowerP.FileWithInputSpectrum;//"/mnt/quasar/fdavies/cdm_1Mpc_128_v30_IC.dat"; // CICASS IC filename
     int i, j, k, dummy, dummy2;
-    int n;
+    long n;
     // only read in the file on the primary task
     
     if(!(fd = fopen(fname, "r")))
@@ -237,7 +237,12 @@ int main(int argc, char **argv)
     }
     fread(&dummy, sizeof(dummy), 1, fd);
     
-    long NumPart = header1.npart[0];
+    long NumPart;
+    if (All2.Ngrid < 1500) {
+        NumPart = header1.npart[0];
+    } else {
+        NumPart = header2.npart[0];
+    }
     long NumPartSph = NumPart;
     long NumPartTask = NumPart/NumTask;
     float skip[3];
@@ -255,7 +260,10 @@ int main(int argc, char **argv)
             {
                 fread(skip, sizeof(float), 3, fd);
             }*/
-            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            if (All2.Ngrid < 1500)
+                fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            else
+                fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR);
             //for (n=0; n<8; n++) {
             //    printf("Read gadget Pos1 %f %f %f\n",gas_pos[n][0],gas_pos[n][1],gas_pos[n][2]);
             //}
@@ -281,7 +289,10 @@ int main(int argc, char **argv)
             printf("Read gadget DM Pos %f %f %f\n",ICP[1].Pos[0],ICP[1].Pos[1],ICP[1].Pos[2]);
         }
         else {
-            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+            if (All2.Ngrid < 1500)
+                fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+            else
+                fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR);
         }
     }
     fread(&dummy2, sizeof(dummy2), 1, fd);
@@ -298,7 +309,10 @@ int main(int argc, char **argv)
     {
         if(k == 0)
         {
-            fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            if (All2.Ngrid < 1500)
+                fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            else
+                fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR);
             //printf("Read gadget Vel1 %f %f %f\n",gas_vel[1][0],gas_vel[1][1],gas_vel[1][1]);
         }
         else if (k == 1)
@@ -314,8 +328,12 @@ int main(int argc, char **argv)
             fseek(fd, (NumPart-(ThisTask+1)*NumPartTask) * sizeof(float) * 3, SEEK_CUR);
             printf("Read gadget DM Vel %f %f %f\n",ICP[1].Vel[0],ICP[1].Vel[1],ICP[1].Vel[2]);
         }
-        else
-        fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+        else {
+            if (All2.Ngrid < 1500)
+                fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+            else
+                fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR);
+        }
     }
     fread(&dummy2, sizeof(dummy2), 1, fd);
     if(dummy2 != dummy)
@@ -380,7 +398,11 @@ int main(int argc, char **argv)
       fflush(stdout);
       
       fread(&dummy, sizeof(dummy), 1, fd);
-      fread(&header1, sizeof(header1), 1, fd);
+      if (All2.Ngrid < 1500) {
+          fread(&header1, sizeof(header1), 1, fd);
+      } else { // For huge grids, switch to custom format with bigger integers
+          fread(&header2, sizeof(header2), 1, fd);
+      }
       fread(&dummy, sizeof(dummy), 1, fd);
       
       
@@ -404,10 +426,16 @@ int main(int argc, char **argv)
               }
               else if (k == 1)
               {
-                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+                  if (All2.Ngrid < 1500)
+                      fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+                  else
+                      fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR);
               }
               else {
-                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+                  if (All2.Ngrid < 1500)
+                      fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+                  else
+                      fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR);
               }
           }
           fread(&dummy2, sizeof(dummy2), 1, fd);
@@ -438,10 +466,16 @@ int main(int argc, char **argv)
               }
               else if (k == 1)
               {
-                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+                  if (All2.Ngrid < 1500)
+                      fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+                  else
+                      fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR);
               }
               else {
-                  fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
+                  if (All2.Ngrid < 1500)
+                      fseek(fd, header1.npart[k] * sizeof(float) * 3, SEEK_CUR);
+                  else
+                      fseek(fd, header2.npart[k] * sizeof(float) * 3, SEEK_CUR); // moves on in the file without reading
               }
           }
           fread(&dummy2, sizeof(dummy2), 1, fd);
